@@ -7,6 +7,9 @@ services:
       PORT: 3000
     expose:
       - "3000"
+    volumes:
+      # News subscribers are saved here so they survive restarts and redeploys.
+      - app_data:/app/data
 
   # Terminates HTTPS with an automatic Let's Encrypt certificate.
   # Requires DOMAIN in .env pointing (DNS A record) at this server, with ports 80 and 443 open.
@@ -26,5 +29,6 @@ services:
       - app
 
 volumes:
+  app_data:
   caddy_data:
   caddy_config:

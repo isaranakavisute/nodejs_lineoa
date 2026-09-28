@@ -1,6 +1,38 @@
 # LINE OA Node.js Webhook
 
-Express server that connects to a LINE Official Account through the Messaging API, using the official [`@line/bot-sdk`](https://github.com/line/line-bot-sdk-nodejs). Out of the box, it echoes back any text message it receives.
+Express server that connects to a LINE Official Account through the Messaging API, using the official [`@line/bot-sdk`](https://github.com/line/line-bot-sdk-nodejs). It uses Claude (`@anthropic-ai/sdk`) to translate text messages into any language and to answer questions about photos.
+
+## Using the bot
+
+| Send | Result |
+| --- | --- |
+| `Good morning` | Translated into the chat's target language (default: English; text already in English goes into Thai) |
+| `to Japanese: good morning` / `แปลเป็นภาษาจีน สวัสดี` | One-off translation into the named language |
+| `/lang Korean` | Always translate into Korean in this chat (1:1 or group) |
+| `/lang` | Show the current setting |
+| `/lang reset` | Back to the default |
+| A photo, then `What is this?` | Claude answers questions about the photo, in the language you ask in (1:1 chats only) |
+| `/done` | Stop asking about the photo and go back to translation |
+| `/news on` / `/news on Thai` | Get the top 5 world news stories every morning at 07:00 Bangkok time, in any language |
+| `/news off` | Stop the morning news |
+| `/news` | Get today's news now |
+| `/help` | Show help |
+
+After you send a photo, your text messages are treated as questions about it until you send `/done`, send another photo, or 10 minutes pass without a question. In group chats, photos are ignored so the bot doesn't reply to every shared picture.
+
+The morning news is written by Claude from live web searches; each story links to its source. It is generated once per language each day and pushed to every subscribed chat (1:1 or group). Subscribers are saved in `data/news-subscribers.json` (a Docker volume in production), so they survive restarts. Change the schedule with `NEWS_TIME`, `NEWS_TIMEZONE`, `NEWS_LANGUAGE` and `NEWS_STORY_COUNT`.
+
+Preview or trigger it by hand:
+
+```sh
+npm run news                # preview today's digest in the default language
+npm run news -- Thai        # preview in Thai
+npm run news -- --send      # push to all subscribers now
+```
+
+Each morning push counts toward your LINE plan's monthly message quota (one message per subscriber per day). Replies to user messages are free.
+
+Language settings and photo conversations are kept in memory and reset when the server restarts.
 
 ## 1. Create the channel
 
@@ -15,7 +47,16 @@ Express server that connects to a LINE Official Account through the Messaging AP
 
 ```sh
 npm install
-cp .env.example .env   # then fill in LINE_CHANNEL_SECRET and LINE_CHANNEL_ACCESS_TOKEN
+cp .env.example .env   # then fill in LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN, ANTHROPIC_API_KEY
+```
+
+Get an Anthropic API key at <https://platform.claude.com/settings/keys>. Optional settings: `CLAUDE_MODEL` (default `claude-opus-5`), `DEFAULT_TARGET_LANGUAGE` (default `English`), `DEFAULT_SECONDARY_LANGUAGE` (default `Thai`).
+
+Try translation without LINE:
+
+```sh
+npm run translate -- "สวัสดีครับ ยินดีที่ได้รู้จัก"
+npm run translate -- "Good morning" Japanese
 ```
 
 ## 3. Run
@@ -84,7 +125,15 @@ The user ID (`U...`) appears in webhook events (`event.source.userId`) and is al
 | --- | --- |
 | `src/index.js` | Starts the HTTP server |
 | `src/app.js` | Express app and `/webhook` route with signature verification |
-| `src/handlers.js` | Event handling; put your bot logic here |
+| `src/handlers.js` | Event handling and `/lang`, `/help` commands |
+| `src/translate.js` | Claude translation call and prompt |
+| `src/vision.js` | Image download from LINE and Claude image Q&A |
+| `src/news.js` | Claude + web search news digest |
+| `src/newsScheduler.js` | Daily schedule and push to subscribers |
+| `src/store.js` | Saves news subscribers to disk |
 | `src/line.js` | Shared Messaging API client |
 | `src/config.js` | Loads and validates environment variables |
 | `scripts/push.js` | CLI for sending push messages |
+| `scripts/translate.js` | CLI for testing translations |
+| `scripts/news.js` | CLI for previewing or sending the news digest |
+| `scripts/check.js` | Verifies LINE credentials and webhook settings |

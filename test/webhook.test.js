@@ -6,6 +6,7 @@ const SECRET = 'test-channel-secret';
 process.env.NODE_ENV = 'test';
 process.env.LINE_CHANNEL_SECRET = SECRET;
 process.env.LINE_CHANNEL_ACCESS_TOKEN = 'test-token';
+process.env.ANTHROPIC_API_KEY = 'test-key';
 
 const { app } = await import('../src/app.js');
 
