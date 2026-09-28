@@ -6,6 +6,98 @@ import { chat, ChatRefused } from './chat.js';
 import { downloadImage, askAboutImage, ImageTooLarge, UnsupportedImage, AnswerRefused } from './vision.js';
 import { getDigest, DigestRefused } from './news.js';
 import { subscribe, unsubscribe, getSubscription } from './store.js';
+import { fetchEvents, formatAgenda, endOfToday, parseMeetCommand, createEvent, deleteEvent, formatDateTime } from './calendar.js';
+import { NotSignedIn, NoWriteAccess, hasPermission } from './microsoft.js';
+import { parseEmailCommand, sendEmail } from './mail.js';
+import { fetchUnreadToday, formatInbox } from './inbox.js';
+
+// Meetings the owner created with /meet, newest last, so /meet undo can delete them.
+const createdMeetings = [];
+
+// An email waiting for the owner to confirm with /send: { to, subject, body, expiresAt }.
+let pendingEmail = null;
+const EMAIL_CONFIRM_MS = 10 * 60 * 1000;
+
+const EMAIL_HELP = `✉️ Send an email from your Outlook account.
+Write it as three parts on separate lines:
+
+/email friend@example.com
+Subject line
+Message text (can be several lines)
+
+Several recipients: separate them with commas.
+I'll show a preview first; nothing is sent until you reply /send.
+
+/emailhelp – all email commands`;
+
+// Full guide to every email command, shown by /emailhelp (or /mailhelp).
+const EMAIL_COMMANDS_HELP = `📧 Email commands
+
+📬 CHECK EMAIL
+/inbox  (or /mail)
+Shows today's unread emails from your Inbox and Junk folders:
+• how many unread emails arrived today
+• for each one: subject, sender, recipients (To/Cc), time sent, and the first 5 lines
+• junk is marked ⚠️ [Junk]
+Checking never marks emails as read.
+
+✉️ SEND EMAIL
+Write three lines in one message:
+/email friend@example.com
+Subject line
+Message text (can be several lines)
+
+• Several recipients: separate with commas (up to 10)
+• I reply with a preview first. Then:
+/send – send it
+/cancel – discard it
+• A draft expires after 10 minutes
+• Sent emails are saved in your Sent folder
+
+Example:
+/email friend@example.com
+Lunch tomorrow
+Are you free at 12:00?
+
+❓ /emailhelp – show this guide`;
+
+const MEET_HELP = `📅 Add a meeting to your Outlook calendar:
+/meet in 30 Test – starts in 30 minutes
+/meet 14:30 Standup – today (or tomorrow if 14:30 has passed)
+/meet tomorrow 9:00 Review
+/meet 2026-10-01 10:00 Planning
+Add a length after the time, e.g. /meet 14:30 1h Workshop (default 30m).
+/meet undo – delete the last meeting added here
+
+/calendarhelp – all calendar commands`;
+
+// Full guide to every calendar command, shown by /calendarhelp (or /calhelp).
+const CALENDAR_COMMANDS_HELP = `📅 Calendar commands (Hotmail / Outlook)
+
+⏰ AUTOMATIC ALERTS
+I message you ${config.calendar.leadMinutes} minutes before each meeting in your Outlook calendar.
+• Declined, cancelled and all-day events are skipped
+• Meetings starting close together come in one message
+• Each alert uses 1 message from your LINE monthly quota
+
+📋 TODAY'S MEETINGS
+/calendar
+Shows the rest of today's meetings: title, time, place and online meeting link.
+
+➕ ADD A MEETING
+/meet in 30 Test – starts in 30 minutes
+/meet 14:30 Standup – today (tomorrow if 14:30 has passed)
+/meet tomorrow 9:00 Review
+/meet 2026-10-01 10:00 Planning
+• Length: add it after the time, e.g. /meet 14:30 1h Workshop (default 30 min)
+• Times are Bangkok time (${config.calendar.timezone})
+• I confirm the meeting and tell you when its alert will come
+
+🗑 UNDO
+/meet undo – delete the last meeting you added from LINE
+(Only works until the bot restarts; after that, delete it in Outlook.)
+
+❓ /calendarhelp – show this guide`;
 
 // Per-chat settings, keyed by user/group/room ID. Kept in memory; reset when the server restarts.
 const chatLanguages = new Map();
@@ -36,11 +128,13 @@ const HELP_TEXT = `🤖 Claude on LINE
 📷 Questions about an image (1:1 chat only):
 Send a photo, then ask about it. Follow-up questions work for 10 minutes.
 
-📰 Morning world news:
+${config.news.scheduleEnabled ? `📰 Morning world news:
 /news on – get the top world news every day at ${config.news.time}
 /news on Thai – same, in Thai (any language works)
 /news off – stop the morning news
-/news – get today's news now
+/news – get today's news now` : `📰 World news:
+/news – get today's top world news
+/news Thai – same, in Thai (any language works)`}
 
 Commands:
 /chat – talk to Claude (starts a new conversation)
@@ -231,6 +325,28 @@ function handleCommand({ name, arg }, replyToken, id, source) {
     chatModes.set(id, 'translate');
     return reply(replyToken, `🌐 Translate mode: messages in this chat will be translated into ${language}.\n\nSend /chat to talk to Claude.`);
   }
+  if (name === 'myid') {
+    // Shows the sender their own LINE user ID (e.g. for CALENDAR_ALERT_TO).
+    return reply(replyToken, `Your LINE user ID:\n${source.userId}`);
+  }
+  if (name === 'calendar') {
+    return handleCalendarCommand(replyToken, source);
+  }
+  if (name === 'meet') {
+    return handleMeetCommand(arg, replyToken, source);
+  }
+  if (name === 'inbox' || name === 'mail') {
+    return handleInboxCommand(replyToken, source);
+  }
+  if (name === 'email' || name === 'send' || name === 'cancel') {
+    return handleEmailCommand(name, arg, replyToken, source);
+  }
+  if (name === 'emailhelp' || name === 'mailhelp') {
+    return reply(replyToken, isCalendarOwner(source) ? EMAIL_COMMANDS_HELP : HELP_TEXT);
+  }
+  if (name === 'calendarhelp' || name === 'calhelp') {
+    return reply(replyToken, isCalendarOwner(source) ? CALENDAR_COMMANDS_HELP : HELP_TEXT);
+  }
   if (name === 'news') {
     return handleNewsCommand(arg, replyToken, id);
   }
@@ -239,7 +355,123 @@ function handleCommand({ name, arg }, replyToken, id, source) {
     const back = modeFor(source) === 'chat' ? 'chat' : 'translation';
     return reply(replyToken, hadImage ? `Done with the image. Back to ${back}.` : `You're in ${back} mode.`);
   }
+  // Owner-only commands aren't listed for everyone; point the owner to them.
+  if (isCalendarOwner(source)) {
+    return reply(replyToken, `${HELP_TEXT}\n\n🔒 Your private commands:\n/emailhelp – all email commands\n/calendarhelp – all calendar commands`);
+  }
   return reply(replyToken, HELP_TEXT);
+}
+
+// The calendar is private: only the owner (CALENDAR_ALERT_TO), and only in a 1:1 chat.
+function isCalendarOwner(source) {
+  return Boolean(config.calendar.alertTo) && source.type === 'user' && source.userId === config.calendar.alertTo;
+}
+
+async function handleMeetCommand(arg, replyToken, source) {
+  if (!isCalendarOwner(source)) return reply(replyToken, HELP_TEXT);
+  if (!arg) return reply(replyToken, MEET_HELP);
+
+  try {
+    if (arg.toLowerCase() === 'undo') {
+      const last = createdMeetings.pop();
+      if (!last) return reply(replyToken, 'No meetings added from LINE to undo.');
+      await deleteEvent(last.id);
+      return reply(replyToken, `🗑 Deleted "${last.subject}" (${formatDateTime(last.start)}).`);
+    }
+
+    const now = new Date();
+    const parsed = parseMeetCommand(arg, now);
+    if (parsed.error === 'past') return reply(replyToken, 'That time has already passed.');
+    if (parsed.error) return reply(replyToken, `Sorry, I couldn't read that time.\n\n${MEET_HELP}`);
+
+    const event = await createEvent(parsed);
+    createdMeetings.push(event);
+
+    const alertAt = new Date(event.start.getTime() - config.calendar.leadMinutes * 60000);
+    const alertNote = alertAt <= now ? 'within a minute' : `at ${formatDateTime(alertAt)}`;
+    return reply(
+      replyToken,
+      `✅ Added to your calendar:\n📅 ${event.subject}\n🕐 ${formatDateTime(event.start)} (${parsed.minutes} min)\n\n⏰ You should get the alert ${alertNote}.\n/meet undo to delete it.`,
+    );
+  } catch (err) {
+    if (err instanceof NotSignedIn) return reply(replyToken, '📅 Not connected to your calendar. Run "npm run microsoft-login" on the server.');
+    if (err instanceof NoWriteAccess) return reply(replyToken, '📅 The bot can read your calendar but not add to it yet. Run "npm run microsoft-login" on the server and approve the new permission.');
+    console.error('Calendar update failed:', err.message);
+    return reply(replyToken, 'Could not update your calendar right now. Please try again later.');
+  }
+}
+
+async function handleInboxCommand(replyToken, source) {
+  if (!isCalendarOwner(source)) return reply(replyToken, HELP_TEXT);
+  if (!hasPermission('Mail.Read')) {
+    return reply(replyToken, '📬 The bot isn’t allowed to read your email yet. Run "npm run microsoft-login" on the server and approve the new permission.');
+  }
+  showLoading(source);
+  try {
+    const texts = formatInbox(await fetchUnreadToday(new Date()));
+    return client.replyMessage({ replyToken, messages: texts.map((text) => ({ type: 'text', text })) });
+  } catch (err) {
+    if (err instanceof NotSignedIn) return reply(replyToken, '📬 Not connected to your Outlook account. Run "npm run microsoft-login" on the server.');
+    console.error('Inbox check failed:', err.message);
+    return reply(replyToken, 'Could not check your email right now. Please try again later.');
+  }
+}
+
+async function handleEmailCommand(name, arg, replyToken, source) {
+  if (!isCalendarOwner(source)) return reply(replyToken, HELP_TEXT);
+
+  if (name === 'cancel') {
+    const had = Boolean(pendingEmail);
+    pendingEmail = null;
+    return reply(replyToken, had ? '🗑 Email discarded. Nothing was sent.' : 'There’s no email waiting to be sent.');
+  }
+
+  if (name === 'send') {
+    if (!pendingEmail || Date.now() > pendingEmail.expiresAt) {
+      pendingEmail = null;
+      return reply(replyToken, 'There’s no email waiting to be sent (drafts expire after 10 minutes).');
+    }
+    const draft = pendingEmail;
+    pendingEmail = null;
+    try {
+      await sendEmail(draft);
+      return reply(replyToken, `✅ Email sent to ${draft.to.join(', ')}.\nA copy is in your Sent folder.`);
+    } catch (err) {
+      if (err instanceof NotSignedIn) return reply(replyToken, '✉️ Not connected to your Outlook account. Run "npm run microsoft-login" on the server.');
+      if (err instanceof NoWriteAccess) return reply(replyToken, '✉️ The bot isn’t allowed to send email yet. Run "npm run microsoft-login" on the server and approve the new permission.');
+      console.error('Email send failed:', err.message);
+      return reply(replyToken, 'The email could not be sent. Nothing was sent; please try again later.');
+    }
+  }
+
+  // /email: parse and show a preview.
+  if (!arg) return reply(replyToken, EMAIL_HELP);
+  if (!hasPermission('Mail.Send')) {
+    return reply(replyToken, '✉️ The bot isn’t allowed to send email yet. Run "npm run microsoft-login" on the server and approve the new permission.');
+  }
+  const draft = parseEmailCommand(arg);
+  if (draft.error === 'address') return reply(replyToken, `That doesn’t look like an email address: ${draft.detail}`);
+  if (draft.error === 'too-many') return reply(replyToken, 'Please send to 10 recipients or fewer.');
+  if (draft.error) return reply(replyToken, EMAIL_HELP);
+
+  pendingEmail = { ...draft, expiresAt: Date.now() + EMAIL_CONFIRM_MS };
+  const preview = draft.body.length > 1500 ? `${draft.body.slice(0, 1500)}…` : draft.body;
+  return reply(
+    replyToken,
+    `✉️ Ready to send:\n\nTo: ${draft.to.join(', ')}\nSubject: ${draft.subject}\n\n${preview}\n\n👉 Reply /send to send it, or /cancel.`,
+  );
+}
+
+async function handleCalendarCommand(replyToken, source) {
+  if (!isCalendarOwner(source)) return reply(replyToken, HELP_TEXT);
+  try {
+    const now = new Date();
+    return reply(replyToken, formatAgenda(await fetchEvents(now, endOfToday(now)), now));
+  } catch (err) {
+    if (err instanceof NotSignedIn) return reply(replyToken, '📅 Not connected to your calendar. Run "npm run microsoft-login" on the server.');
+    console.error('Calendar lookup failed:', err.message);
+    return reply(replyToken, 'Could not read your calendar right now. Please try again later.');
+  }
 }
 
 function handleNewsCommand(arg, replyToken, id) {
@@ -249,6 +481,9 @@ function handleNewsCommand(arg, replyToken, id) {
   if (action.toLowerCase() === 'on') {
     const language = rest.join(' ').slice(0, 50) || subscription?.language || config.news.defaultLanguage;
     subscribe(id, language);
+    if (!config.news.scheduleEnabled) {
+      return reply(replyToken, `The daily morning news is turned off at the moment. I've saved your choice (${language}) for when it's back on.\n\nYou can still send /news any time to get today's news.`);
+    }
     return reply(replyToken, `📰 Subscribed! You'll get the top world news in ${language} every day at ${config.news.time} (${config.news.timezone}).\n\nSend /news off to stop.`);
   }
   if (action.toLowerCase() === 'off') {
@@ -260,10 +495,12 @@ function handleNewsCommand(arg, replyToken, id) {
   // longer than a reply token stays valid, so acknowledge now and push the digest when ready.
   const language = arg || subscription?.language || config.news.defaultLanguage;
   sendDigestNow(id, language);
-  const status = subscription
+  const status = !config.news.scheduleEnabled
+    ? ''
+    : subscription
     ? `You're subscribed (${subscription.language}, daily at ${config.news.time}).`
     : 'Tip: send /news on to get this every morning.';
-  return reply(replyToken, `⏳ Gathering today's top world news… this can take a minute.\n\n${status}`);
+  return reply(replyToken, `⏳ Gathering today's top world news… this can take a minute.${status ? `\n\n${status}` : ''}`);
 }
 
 async function sendDigestNow(id, language) {

@@ -22,10 +22,22 @@ export const config = {
   // Where persistent data (news subscribers) is saved.
   dataDir: process.env.DATA_DIR || 'data',
   news: {
+    // The daily push is off unless NEWS_SCHEDULE_ENABLED=true. /news on demand always works.
+    scheduleEnabled: process.env.NEWS_SCHEDULE_ENABLED === 'true',
     time: process.env.NEWS_TIME || '07:00',
     timezone: process.env.NEWS_TIMEZONE || 'Asia/Bangkok',
     defaultLanguage: process.env.NEWS_LANGUAGE || 'English',
     storyCount: Number(process.env.NEWS_STORY_COUNT) || 5,
+  },
+  calendar: {
+    // From your app registration in the Microsoft Entra admin center.
+    clientId: process.env.MICROSOFT_CLIENT_ID || '',
+    // 'consumers' = personal Microsoft accounts (Hotmail, Outlook.com, Live).
+    tenant: process.env.MICROSOFT_TENANT || 'consumers',
+    // Your own LINE user ID: alerts go only here, and only this user can use /calendar.
+    alertTo: process.env.CALENDAR_ALERT_TO || '',
+    leadMinutes: Number(process.env.CALENDAR_ALERT_MINUTES) || 60,
+    timezone: process.env.CALENDAR_TIMEZONE || 'Asia/Bangkok',
   },
   translation: {
     // Messages are translated into the target language; text already in it goes to the secondary.

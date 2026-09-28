@@ -24,7 +24,7 @@ Each chat is in one of two modes. 1:1 chats start in **chat mode**; group chats 
 
 After you send a photo, your text messages are treated as questions about it until you send `/done`, send another photo, or 10 minutes pass without a question. In group chats, photos are ignored so the bot doesn't reply to every shared picture.
 
-The morning news is written by Claude from live web searches; each story links to its source. It is generated once per language each day and pushed to every subscribed chat (1:1 or group). Subscribers are saved in `data/news-subscribers.json` (a Docker volume in production), so they survive restarts. Change the schedule with `NEWS_TIME`, `NEWS_TIMEZONE`, `NEWS_LANGUAGE` and `NEWS_STORY_COUNT`.
+The morning news push is **off by default**; set `NEWS_SCHEDULE_ENABLED=true` to turn it on. `/news` works on demand either way. The morning news is written by Claude from live web searches; each story links to its source. It is generated once per language each day and pushed to every subscribed chat (1:1 or group). Subscribers are saved in `data/news-subscribers.json` (a Docker volume in production), so they survive restarts. Change the schedule with `NEWS_TIME`, `NEWS_TIMEZONE`, `NEWS_LANGUAGE` and `NEWS_STORY_COUNT`.
 
 Preview or trigger it by hand:
 
@@ -115,6 +115,80 @@ docker run -d --restart unless-stopped --env-file .env -p 3000:3000 lineoa
 
 Platforms that inject `PORT` are supported automatically.
 
+## Calendar alerts (Outlook.com / Hotmail)
+
+Send `/calendarhelp` (or `/calhelp`) in LINE for a guide to all calendar commands.
+
+The bot can check your Outlook calendar every minute and send you a LINE message 1 hour before each meeting. This does not use Claude. Declined, cancelled and all-day events are skipped, and meetings starting at the same time are combined into one message. Each alert is a push message and counts toward your LINE plan's monthly quota. Send `/calendar` to the bot to see the rest of today's meetings; that's a reply, so it's free. Only the owner (`CALENDAR_ALERT_TO`) can use it.
+
+For testing, the owner can also add meetings from LINE (replies, so free):
+
+| Send | Result |
+| --- | --- |
+| `/meet in 30 Test` | Adds "Test" starting 30 minutes from now |
+| `/meet 14:30 Standup` | Today at 14:30 (tomorrow if that time has passed) |
+| `/meet tomorrow 9:00 Review` / `/meet 2026-10-01 10:00 Planning` | A specific day |
+| `/meet 14:30 1h Workshop` | With a length (default 30 minutes) |
+| `/meet undo` | Deletes the last meeting added from LINE (since the server started) |
+| `/meet` | Shows these options |
+
+Adding meetings needs calendar write access (`Calendars.ReadWrite`); the sign-in below asks for it. If you signed in before `/meet` existed, alerts keep working, but run the sign-in again to allow `/meet`.
+
+### 1. Register an app with Microsoft (one time)
+
+1. Go to <https://entra.microsoft.com> (or <https://portal.azure.com>) and sign in with your Hotmail account. If it asks you to create a free Azure account or directory, do that first.
+2. **App registrations → New registration**
+   - Name: `LINE calendar alerts`
+   - Supported account types: **Personal Microsoft accounts only**
+   - Redirect URI: leave empty
+3. Copy the **Application (client) ID**.
+4. **Authentication** → **Allow public client flows** → **Yes** → Save.
+5. **API permissions** should include Microsoft Graph `Calendars.ReadWrite`, `Mail.Send` and `Mail.Read` (delegated). Add it if it's missing. There's no client secret to create.
+
+### 2. Configure
+
+Add to `.env`:
+
+```
+MICROSOFT_CLIENT_ID=<Application (client) ID>
+CALENDAR_ALERT_TO=<your LINE user ID>
+```
+
+Your LINE user ID (starts with `U`) is shown as **Your user ID** on the channel's **Basic settings** tab in the LINE Developers Console. Optional: `CALENDAR_ALERT_MINUTES` (default `60`) and `CALENDAR_TIMEZONE` (default `Asia/Bangkok`).
+
+### 3. Sign in (one time)
+
+```sh
+npm run microsoft-login                            # local
+docker compose exec app npm run microsoft-login    # production
+```
+
+It prints a code. Open <https://microsoft.com/devicelogin>, enter the code, sign in, and approve access to your calendar. The script then lists today's meetings to confirm it works. Only a refresh token is saved (in `data/microsoft-token.json`, inside the Docker volume in production); your password is never stored. If you change your Microsoft password or revoke access, run the sign-in again; the server log will say `Calendar alerts paused` when that's needed.
+
+Restart the server after setting the `.env` values. The log shows `Calendar alerts on: 60 min before each meeting`.
+
+## Sending email (Outlook.com / Hotmail)
+
+The owner (`CALENDAR_ALERT_TO`) can send email from their Outlook account through LINE. It uses the same Microsoft sign-in as calendar alerts, with the `Mail.Send` permission, and does not use Claude. Replies only, so no LINE quota is used.
+
+Write the message as three parts on separate lines:
+
+```
+/email friend@example.com
+Subject line
+Message text (can be several lines)
+```
+
+The bot shows a preview. Reply `/send` to send it or `/cancel` to discard it; drafts expire after 10 minutes. Several recipients can be separated with commas (up to 10). Sent messages are saved in your Sent folder. If you signed in before email was added, run `npm run microsoft-login` again to approve sending.
+
+## Checking email (Outlook.com / Hotmail)
+
+Send `/emailhelp` (or `/mailhelp`) in LINE for a guide to all email commands. The owner's `/help` also lists their private commands.
+
+The owner can send `/inbox` (or `/mail`) to get today's unread emails from their Outlook **Inbox and Junk Email** folders. It needs the `Mail.Read` permission, doesn't use Claude, and is a reply, so no LINE quota is used. Checking does **not** mark emails as read.
+
+The reply shows how many unread emails arrived since midnight (`CALENDAR_TIMEZONE`), split by folder, then for each one, newest first (junk marked ⚠️ [Junk]): subject, sender, recipients (To and Cc), the time it was sent, and the first 5 lines of the message. Up to 30 emails are listed; if there are more, the reply says so. If you signed in before this was added, run `npm run microsoft-login` again to approve reading mail.
+
 ## Push messages
 
 ```sh
@@ -136,9 +210,15 @@ The user ID (`U...`) appears in webhook events (`event.source.userId`) and is al
 | `src/news.js` | Claude + web search news digest |
 | `src/newsScheduler.js` | Daily schedule and push to subscribers |
 | `src/store.js` | Saves news subscribers to disk |
+| `src/microsoft.js` | Microsoft sign-in and Graph API requests |
+| `src/calendar.js` | Reads Outlook calendar events and formats alerts |
+| `src/calendarScheduler.js` | Checks the calendar every minute and sends alerts |
+| `src/mail.js` | Parses and sends email through Outlook |
+| `src/inbox.js` | Lists today's unread emails (Inbox and Junk) |
 | `src/line.js` | Shared Messaging API client |
 | `src/config.js` | Loads and validates environment variables |
 | `scripts/push.js` | CLI for sending push messages |
 | `scripts/translate.js` | CLI for testing translations |
 | `scripts/news.js` | CLI for previewing or sending the news digest |
+| `scripts/microsoft-login.js` | One-time Microsoft sign-in for calendar alerts |
 | `scripts/check.js` | Verifies LINE credentials and webhook settings |
