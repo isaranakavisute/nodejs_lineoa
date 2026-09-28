@@ -7,7 +7,7 @@ import { downloadImage, askAboutImage, ImageTooLarge, UnsupportedImage, AnswerRe
 import { getDigest, DigestRefused } from './news.js';
 import { subscribe, unsubscribe, getSubscription } from './store.js';
 import { fetchEvents, formatAgenda, endOfToday, parseMeetCommand, createEvent, deleteEvent, formatDateTime } from './calendar.js';
-import { NotSignedIn, NoWriteAccess, hasPermission } from './microsoft.js';
+import { NotSignedIn, NoWriteAccess, hasPermission, isSignedIn } from './microsoft.js';
 import { parseEmailCommand, sendEmail } from './mail.js';
 import { fetchUnreadToday, formatInbox } from './inbox.js';
 
@@ -401,11 +401,24 @@ async function handleMeetCommand(arg, replyToken, source) {
   }
 }
 
+// How to sign in on the production server (the bot runs as the container "nodejs_lineoa").
+const SIGN_IN_COMMAND = 'docker exec -it nodejs_lineoa npm run microsoft-login';
+
+// Explains what's missing when this server can't use a Microsoft permission yet, or returns null.
+function missingMicrosoftAccess(permission, action) {
+  if (!isSignedIn()) {
+    return `This server isn’t connected to your Outlook account yet. Sign in once on the server:\n${SIGN_IN_COMMAND}`;
+  }
+  if (!hasPermission(permission)) {
+    return `The bot isn’t allowed to ${action} yet: this server’s sign-in is from before that feature. Sign in again on the server and click Accept:\n${SIGN_IN_COMMAND}`;
+  }
+  return null;
+}
+
 async function handleInboxCommand(replyToken, source) {
   if (!isCalendarOwner(source)) return reply(replyToken, HELP_TEXT);
-  if (!hasPermission('Mail.Read')) {
-    return reply(replyToken, '📬 The bot isn’t allowed to read your email yet. Run "npm run microsoft-login" on the server and approve the new permission.');
-  }
+  const missing = missingMicrosoftAccess('Mail.Read', 'read your email');
+  if (missing) return reply(replyToken, `📬 ${missing}`);
   showLoading(source);
   try {
     const texts = formatInbox(await fetchUnreadToday(new Date()));
@@ -446,9 +459,8 @@ async function handleEmailCommand(name, arg, replyToken, source) {
 
   // /email: parse and show a preview.
   if (!arg) return reply(replyToken, EMAIL_HELP);
-  if (!hasPermission('Mail.Send')) {
-    return reply(replyToken, '✉️ The bot isn’t allowed to send email yet. Run "npm run microsoft-login" on the server and approve the new permission.');
-  }
+  const missing = missingMicrosoftAccess('Mail.Send', 'send email');
+  if (missing) return reply(replyToken, `✉️ ${missing}`);
   const draft = parseEmailCommand(arg);
   if (draft.error === 'address') return reply(replyToken, `That doesn’t look like an email address: ${draft.detail}`);
   if (draft.error === 'too-many') return reply(replyToken, 'Please send to 10 recipients or fewer.');
