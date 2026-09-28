@@ -2,12 +2,23 @@ import Anthropic from '@anthropic-ai/sdk';
 import { client } from './line.js';
 import { config } from './config.js';
 import { translate, TranslationRefused } from './translate.js';
+import { chat, ChatRefused } from './chat.js';
 import { downloadImage, askAboutImage, ImageTooLarge, UnsupportedImage, AnswerRefused } from './vision.js';
 import { getDigest, DigestRefused } from './news.js';
 import { subscribe, unsubscribe, getSubscription } from './store.js';
 
-// Per-chat target language, keyed by user/group/room ID. Resets when the server restarts.
+// Per-chat settings, keyed by user/group/room ID. Kept in memory; reset when the server restarts.
 const chatLanguages = new Map();
+// 'chat' (talk to Claude) or 'translate'. 1:1 chats start in chat mode; groups start in
+// translate mode so the bot doesn't answer every message people send each other.
+const chatModes = new Map();
+
+// Chat-mode conversations: { messages, updatedAt }.
+const conversations = new Map();
+// A conversation idle this long starts fresh.
+const CONVERSATION_IDLE_MS = 60 * 60 * 1000;
+// Only the most recent messages are sent to Claude (10 exchanges).
+const MAX_CONVERSATION_MESSAGES = 20;
 
 // Per-user image conversations: { image, history, expiresAt }. Kept in memory only.
 const imageSessions = new Map();
@@ -15,9 +26,10 @@ const IMAGE_SESSION_MS = 10 * 60 * 1000;
 // Earlier follow-up exchanges beyond this are dropped (the image and first question are kept).
 const MAX_FOLLOW_UPS = 8;
 
-const HELP_TEXT = `🌐 Translation bot
+const HELP_TEXT = `🤖 Claude on LINE
 
-Send any message and I'll translate it.
+💬 Chat mode (/chat): ask Claude anything. It remembers the conversation for an hour.
+🌐 Translate mode (/translate): every message is translated.
 • Default: into ${config.translation.defaultTarget} (text already in ${config.translation.defaultTarget} goes into ${config.translation.defaultSecondary})
 • One-off: "to Japanese: good morning" or "แปลเป็นภาษาจีน สวัสดี"
 
@@ -31,7 +43,9 @@ Send a photo, then ask about it. Follow-up questions work for 10 minutes.
 /news – get today's news now
 
 Commands:
-/lang Japanese – always translate into Japanese in this chat
+/chat – talk to Claude (starts a new conversation)
+/translate – translate every message
+/lang Japanese – translate everything into Japanese
 /lang – show the current setting
 /lang reset – back to the default
 /done – finish asking about an image
@@ -69,6 +83,10 @@ function languagesFor(id) {
     : { target: config.translation.defaultTarget, secondary: config.translation.defaultSecondary };
 }
 
+function modeFor(source) {
+  return chatModes.get(chatId(source)) ?? (source.type === 'user' ? 'chat' : 'translate');
+}
+
 function activeImageSession(id) {
   const session = imageSessions.get(id);
   if (!session) return null;
@@ -89,20 +107,26 @@ async function handleMessage(event) {
   }
 
   if (message.type !== 'text') {
-    return reply(replyToken, 'Please send text to translate, or a photo to ask about.');
+    return reply(replyToken, 'Please send text, or a photo to ask about.');
   }
 
   const command = parseCommand(message.text);
   if (command) {
-    return handleCommand(command, replyToken, chatId(source));
+    return handleCommand(command, replyToken, chatId(source), source);
   }
 
   showLoading(source);
 
+  const id = chatId(source);
   const session = source.type === 'user' ? activeImageSession(source.userId) : null;
-  const text = session
-    ? await answerQuestion(session, message.text)
-    : await translateText(message.text, languagesFor(chatId(source)));
+  let text;
+  if (session) {
+    text = await answerQuestion(session, message.text);
+  } else if (modeFor(source) === 'chat') {
+    text = await chatReply(id, message.text);
+  } else {
+    text = await translateText(message.text, languagesFor(id));
+  }
 
   return reply(replyToken, text || '(empty response)');
 }
@@ -111,7 +135,7 @@ async function handleImage(message, replyToken, userId) {
   try {
     const image = await downloadImage(message);
     imageSessions.set(userId, { image, history: [], expiresAt: Date.now() + IMAGE_SESSION_MS });
-    return reply(replyToken, '📷 Got it! Ask me anything about this image.\nถามอะไรเกี่ยวกับรูปนี้ได้เลย\n\n(/done to go back to translation)');
+    return reply(replyToken, '📷 Got it! Ask me anything about this image.\nถามอะไรเกี่ยวกับรูปนี้ได้เลย\n\n(/done when finished)');
   } catch (err) {
     if (err instanceof ImageTooLarge) return reply(replyToken, 'That image is too large (max 5 MB).');
     if (err instanceof UnsupportedImage) return reply(replyToken, 'Sorry, I can only read JPEG, PNG, GIF, or WebP images.');
@@ -141,6 +165,26 @@ async function answerQuestion(session, question) {
   }
 }
 
+async function chatReply(id, text) {
+  let conversation = conversations.get(id);
+  if (!conversation || Date.now() - conversation.updatedAt > CONVERSATION_IDLE_MS) {
+    conversation = { messages: [] };
+    conversations.set(id, conversation);
+  }
+
+  const messages = [...conversation.messages, { role: 'user', content: text }];
+  try {
+    const answer = await chat(messages);
+    // Keep whole user/assistant pairs so the history always starts with a user message.
+    conversation.messages = [...messages, { role: 'assistant', content: answer }].slice(-MAX_CONVERSATION_MESSAGES);
+    conversation.updatedAt = Date.now();
+    return answer;
+  } catch (err) {
+    if (err instanceof ChatRefused) return 'Sorry, I can’t help with that.';
+    return claudeErrorMessage(err);
+  }
+}
+
 async function translateText(text, languages) {
   try {
     return await translate(text, languages);
@@ -162,7 +206,17 @@ function claudeErrorMessage(err) {
   throw err;
 }
 
-function handleCommand({ name, arg }, replyToken, id) {
+function handleCommand({ name, arg }, replyToken, id, source) {
+  if (name === 'chat') {
+    chatModes.set(id, 'chat');
+    conversations.delete(id);
+    return reply(replyToken, '💬 Chat mode: ask me anything! (New conversation started.)\n\nSend /translate to go back to translating.');
+  }
+  if (name === 'translate') {
+    chatModes.set(id, 'translate');
+    const { target } = languagesFor(id);
+    return reply(replyToken, `🌐 Translate mode: messages will be translated into ${target}.\n\nSend /chat to talk to Claude.`);
+  }
   if (name === 'lang') {
     if (!arg) {
       const { target, secondary } = languagesFor(id);
@@ -174,14 +228,16 @@ function handleCommand({ name, arg }, replyToken, id) {
     }
     const language = arg.slice(0, 50);
     chatLanguages.set(id, language);
-    return reply(replyToken, `OK! Messages in this chat will be translated into ${language}.`);
+    chatModes.set(id, 'translate');
+    return reply(replyToken, `🌐 Translate mode: messages in this chat will be translated into ${language}.\n\nSend /chat to talk to Claude.`);
   }
   if (name === 'news') {
     return handleNewsCommand(arg, replyToken, id);
   }
   if (name === 'done') {
     const hadImage = imageSessions.delete(id);
-    return reply(replyToken, hadImage ? 'Done with the image. Back to translation.' : 'Translation mode is on.');
+    const back = modeFor(source) === 'chat' ? 'chat' : 'translation';
+    return reply(replyToken, hadImage ? `Done with the image. Back to ${back}.` : `You're in ${back} mode.`);
   }
   return reply(replyToken, HELP_TEXT);
 }

@@ -1,14 +1,18 @@
 # LINE OA Node.js Webhook
 
-Express server that connects to a LINE Official Account through the Messaging API, using the official [`@line/bot-sdk`](https://github.com/line/line-bot-sdk-nodejs). It uses Claude (`@anthropic-ai/sdk`) to translate text messages into any language and to answer questions about photos.
+Express server that connects to a LINE Official Account through the Messaging API, using the official [`@line/bot-sdk`](https://github.com/line/line-bot-sdk-nodejs). It uses Claude (`@anthropic-ai/sdk`) to chat, translate text into any language, answer questions about photos, and send a morning world news digest.
 
 ## Using the bot
 
+Each chat is in one of two modes. 1:1 chats start in **chat mode**; group chats start in **translate mode** so the bot doesn't answer every message people send each other.
+
 | Send | Result |
 | --- | --- |
-| `Good morning` | Translated into the chat's target language (default: English; text already in English goes into Thai) |
+| `/chat` | Chat mode: ask Claude anything. It remembers the last 10 exchanges for up to an hour. Sending `/chat` again starts a new conversation |
+| `/translate` | Translate mode: every message is translated |
+| `Good morning` (translate mode) | Translated into the chat's target language (default: English; text already in English goes into Thai) |
 | `to Japanese: good morning` / `แปลเป็นภาษาจีน สวัสดี` | One-off translation into the named language |
-| `/lang Korean` | Always translate into Korean in this chat (1:1 or group) |
+| `/lang Korean` | Switch to translate mode and translate into Korean |
 | `/lang` | Show the current setting |
 | `/lang reset` | Back to the default |
 | A photo, then `What is this?` | Claude answers questions about the photo, in the language you ask in (1:1 chats only) |
@@ -32,7 +36,7 @@ npm run news -- --send      # push to all subscribers now
 
 Each morning push counts toward your LINE plan's monthly message quota (one message per subscriber per day). Replies to user messages are free.
 
-Language settings and photo conversations are kept in memory and reset when the server restarts.
+Modes, language settings, chat history, and photo conversations are kept in memory and reset when the server restarts.
 
 ## 1. Create the channel
 
@@ -126,6 +130,7 @@ The user ID (`U...`) appears in webhook events (`event.source.userId`) and is al
 | `src/index.js` | Starts the HTTP server |
 | `src/app.js` | Express app and `/webhook` route with signature verification |
 | `src/handlers.js` | Event handling and `/lang`, `/help` commands |
+| `src/chat.js` | Claude chat call and prompt |
 | `src/translate.js` | Claude translation call and prompt |
 | `src/vision.js` | Image download from LINE and Claude image Q&A |
 | `src/news.js` | Claude + web search news digest |
