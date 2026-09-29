@@ -217,6 +217,27 @@ The Page token stops working if you change your Facebook password, remove the ap
 
 **Development mode:** posts made while the app is in Development mode may only be visible to people with a role on the app (you). After your first post, open it in a private browser window while logged out. If it isn't visible, switch the app to **Live** in the Meta dashboard (it asks for a privacy policy URL).
 
+## Owner menu (tap instead of typing)
+
+The owner gets a private **Rich Menu**, a panel of 6 buttons at the bottom of the LINE chat: 📬 Inbox, ✉️ Email, 📅 Calendar, 📘 Facebook, 💬 Chat / Translate and ❓ Help. Other users don't see it. `/menu` shows the same buttons as a message.
+
+Buttons either run a command straight away (Inbox, Today's meetings), open a small set of choices, or start a **step-by-step guide** that asks one question at a time with tap-to-choose answers:
+
+- ✉️ **Email:** recipient → subject → message → preview with **✅ Send / ❌ Cancel**
+- 📅 **Add meeting:** when (In 30 min, In 1 hour, Tomorrow 9:00, … or type a time) → length → title → **✅ Add**
+- 📘 **Facebook:** text post, or photo post (📷 Camera / 🖼 Gallery → caption) → preview with **✅ Post**
+- 🌐 **Translate:** English, Thai, Japanese, Chinese, Korean, or type any language
+
+Every step has **❌ Cancel**. Typing any `/command` abandons a guide in progress. Typed commands keep working as before. Guides end by running the same command you could type, and sending or posting still needs your ✅ tap.
+
+Create or update the menu (run from a Mac with Google Chrome; it talks to LINE directly, so there's no need to run it on the server):
+
+```sh
+npm run richmenu                # upload assets/richmenu-owner.png and link it to CALENDAR_ALERT_TO
+npm run richmenu -- --render    # re-draw the image from assets/richmenu-owner.html first
+npm run richmenu -- --remove    # remove the menu
+```
+
 ## Push messages
 
 ```sh
@@ -244,6 +265,7 @@ The user ID (`U...`) appears in webhook events (`event.source.userId`) and is al
 | `src/mail.js` | Parses and sends email through Outlook |
 | `src/inbox.js` | Lists today's unread emails (Inbox and Junk) |
 | `src/facebook.js` | Posts text and photos to your Facebook Page |
+| `src/menu.js` | Owner menu: button taps, sub-menus and step-by-step guides |
 | `src/line.js` | Shared Messaging API client |
 | `src/config.js` | Loads and validates environment variables |
 | `scripts/push.js` | CLI for sending push messages |
@@ -251,4 +273,6 @@ The user ID (`U...`) appears in webhook events (`event.source.userId`) and is al
 | `scripts/news.js` | CLI for previewing or sending the news digest |
 | `scripts/microsoft-login.js` | One-time Microsoft sign-in for calendar alerts |
 | `scripts/facebook-token.js` | Creates the long-lived Facebook Page token |
+| `scripts/richmenu.js` | Creates the owner's Rich Menu and links it to them |
+| `assets/richmenu-owner.html` / `.png` | The Rich Menu image and its source |
 | `scripts/check.js` | Verifies LINE credentials and webhook settings |

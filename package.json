@@ -12,7 +12,8 @@
     "translate": "node scripts/translate.js",
     "news": "node scripts/news.js",
     "microsoft-login": "node scripts/microsoft-login.js",
-    "facebook-token": "node scripts/facebook-token.js"
+    "facebook-token": "node scripts/facebook-token.js",
+    "richmenu": "node scripts/richmenu.js"
   },
   "keywords": [],
   "author": "",

@@ -11,10 +11,15 @@ import { NotSignedIn, NoWriteAccess, hasPermission, isSignedIn } from './microso
 import { parseEmailCommand, sendEmail } from './mail.js';
 import { fetchUnreadToday, formatInbox } from './inbox.js';
 import { parseFacebookPost, postText, postPhoto, isFacebookConfigured, FacebookNotConfigured, FacebookTokenInvalid } from './facebook.js';
+import { replyWithOptions, handlePostback, handleFlowText, handleFlowImage, endFlow, showMenu, isOwner } from './menu.js';
 
 // A Facebook post waiting for the owner to confirm with /post: { message, link?, image?, expiresAt }.
 let pendingFacebookPost = null;
 const FACEBOOK_CONFIRM_MS = 10 * 60 * 1000;
+
+// Buttons under previews, so confirming doesn't need typing.
+const CONFIRM_SEND = [{ label: '✅ Send', cmd: '/send' }, { label: '❌ Cancel', cmd: '/cancel' }];
+const CONFIRM_POST = [{ label: '✅ Post', cmd: '/post' }, { label: '❌ Cancel', cmd: '/cancel' }];
 
 const FACEBOOK_HELP = `📘 Facebook Page commands
 
@@ -176,6 +181,8 @@ export async function handleEvent(event) {
   switch (event.type) {
     case 'message':
       return handleMessage(event);
+    case 'postback':
+      return handlePostback(event);
     case 'follow':
       return reply(event.replyToken, HELP_TEXT);
     case 'unfollow':
@@ -223,6 +230,11 @@ async function handleMessage(event) {
   if (message.type === 'image') {
     // In groups, people share photos with each other; don't respond to every one.
     if (source.type !== 'user') return null;
+    // A photo requested by a guided menu flow (e.g. a Facebook photo post).
+    if (isOwner(source)) {
+      const handled = await handleFlowImage(message, replyToken, source);
+      if (handled !== false) return handled;
+    }
     return handleImage(message, replyToken, source.userId);
   }
 
@@ -232,7 +244,15 @@ async function handleMessage(event) {
 
   const command = parseCommand(message.text);
   if (command) {
+    // Typing a command abandons any guided menu flow in progress.
+    if (isOwner(source)) endFlow(source.userId);
     return handleCommand(command, replyToken, chatId(source), source);
+  }
+
+  // An answer to a guided menu flow's question.
+  if (isOwner(source)) {
+    const handled = await handleFlowText(message.text, replyToken, source);
+    if (handled !== false) return handled;
   }
 
   showLoading(source);
@@ -249,6 +269,26 @@ async function handleMessage(event) {
   }
 
   return reply(replyToken, text || '(empty response)');
+}
+
+// Runs a command as if the user had typed it (used by menu buttons and guided flows).
+export function runCommand(text, replyToken, source) {
+  const command = parseCommand(text);
+  if (!command) return reply(replyToken, HELP_TEXT);
+  return handleCommand(command, replyToken, chatId(source), source);
+}
+
+// Downloads a photo and keeps it as the user's current image. Returns an error message, or null.
+export async function rememberImage(message, userId) {
+  try {
+    const image = await downloadImage(message);
+    imageSessions.set(userId, { image, history: [], expiresAt: Date.now() + IMAGE_SESSION_MS });
+    return null;
+  } catch (err) {
+    if (err instanceof ImageTooLarge) return 'That image is too large (max 5 MB).';
+    if (err instanceof UnsupportedImage) return 'Sorry, I can only use JPEG, PNG, GIF, or WebP images.';
+    throw err;
+  }
 }
 
 async function handleImage(message, replyToken, userId) {
@@ -373,6 +413,9 @@ function handleCommand({ name, arg }, replyToken, id, source) {
   if (name === 'fb' || name === 'fbphoto' || name === 'post') {
     return handleFacebookCommand(name, arg, replyToken, source);
   }
+  if (name === 'menu') {
+    return isOwner(source) ? showMenu('main', replyToken) : reply(replyToken, HELP_TEXT);
+  }
   if (name === 'fbhelp') {
     return reply(replyToken, isCalendarOwner(source) ? FACEBOOK_HELP : HELP_TEXT);
   }
@@ -392,7 +435,7 @@ function handleCommand({ name, arg }, replyToken, id, source) {
   }
   // Owner-only commands aren't listed for everyone; point the owner to them.
   if (isCalendarOwner(source)) {
-    return reply(replyToken, `${HELP_TEXT}\n\n🔒 Your private commands:\n/emailhelp – all email commands\n/calendarhelp – all calendar commands\n/fbhelp – Facebook Page posting`);
+    return reply(replyToken, `${HELP_TEXT}\n\n🔒 Your private commands:\n/menu – tap-to-choose menu\n/emailhelp – all email commands\n/calendarhelp – all calendar commands\n/fbhelp – Facebook Page posting`);
   }
   return reply(replyToken, HELP_TEXT);
 }
@@ -491,6 +534,8 @@ async function handleFacebookCommand(name, arg, replyToken, source) {
     pendingFacebookPost = null;
     try {
       const url = draft.image ? await postPhoto({ image: draft.image, caption: draft.message }) : await postText(draft);
+      // The photo has been used; don't treat the next messages as questions about it.
+      if (draft.image) imageSessions.delete(source.userId);
       return reply(replyToken, `✅ Posted to your Facebook Page:\n${url}`);
     } catch (err) {
       if (err instanceof FacebookTokenInvalid) {
@@ -506,7 +551,7 @@ async function handleFacebookCommand(name, arg, replyToken, source) {
     const session = source.type === 'user' ? activeImageSession(source.userId) : null;
     if (!session) return reply(replyToken, '📷 Send me the photo first, then /fbphoto with your caption (within 10 minutes).');
     pendingFacebookPost = { image: session.image, message: arg.trim().slice(0, 63206), expiresAt: Date.now() + FACEBOOK_CONFIRM_MS };
-    return reply(replyToken, `📘 Ready to post a photo to your Facebook Page${pendingFacebookPost.message ? ` with this caption:\n\n${pendingFacebookPost.message.slice(0, 1500)}` : ' (no caption).'}\n\n👉 Reply /post to publish it, or /cancel.`);
+    return replyWithOptions(replyToken, `📘 Ready to post a photo to your Facebook Page${pendingFacebookPost.message ? ` with this caption:\n\n${pendingFacebookPost.message.slice(0, 1500)}` : ' (no caption).'}\n\n👉 Tap ✅ Post (or reply /post), or ❌ Cancel.`, CONFIRM_POST);
   }
 
   // /fb <text>
@@ -517,7 +562,7 @@ async function handleFacebookCommand(name, arg, replyToken, source) {
 
   pendingFacebookPost = { ...draft, expiresAt: Date.now() + FACEBOOK_CONFIRM_MS };
   const preview = draft.message.length > 1500 ? `${draft.message.slice(0, 1500)}…` : draft.message;
-  return reply(replyToken, `📘 Ready to post to your Facebook Page:\n\n${preview}${draft.link ? `\n\n🔗 Link preview: ${draft.link}` : ''}\n\n👉 Reply /post to publish it, or /cancel.`);
+  return replyWithOptions(replyToken, `📘 Ready to post to your Facebook Page:\n\n${preview}${draft.link ? `\n\n🔗 Link preview: ${draft.link}` : ''}\n\n👉 Tap ✅ Post (or reply /post), or ❌ Cancel.`, CONFIRM_POST);
 }
 
 async function handleEmailCommand(name, arg, replyToken, source) {
@@ -552,9 +597,10 @@ async function handleEmailCommand(name, arg, replyToken, source) {
 
   pendingEmail = { ...draft, expiresAt: Date.now() + EMAIL_CONFIRM_MS };
   const preview = draft.body.length > 1500 ? `${draft.body.slice(0, 1500)}…` : draft.body;
-  return reply(
+  return replyWithOptions(
     replyToken,
-    `✉️ Ready to send:\n\nTo: ${draft.to.join(', ')}\nSubject: ${draft.subject}\n\n${preview}\n\n👉 Reply /send to send it, or /cancel.`,
+    `✉️ Ready to send:\n\nTo: ${draft.to.join(', ')}\nSubject: ${draft.subject}\n\n${preview}\n\n👉 Tap ✅ Send (or reply /send), or ❌ Cancel.`,
+    CONFIRM_SEND,
   );
 }
 
