@@ -12,7 +12,7 @@ export async function fetchEvents(from, to) {
     endDateTime: to.toISOString(),
     $select: 'id,subject,start,end,location,isAllDay,isCancelled,responseStatus,onlineMeeting',
     $orderby: 'start/dateTime',
-    $top: '50',
+    $top: '200',
   });
   const body = await graphGet(`/me/calendarView?${query}`, { Prefer: 'outlook.timezone="UTC"' });
 
@@ -42,8 +42,8 @@ export function dueForAlert(events, now, alreadyAlerted, leadMinutes = config.ca
 const time = (date) =>
   new Intl.DateTimeFormat('en-GB', { timeZone: config.calendar.timezone, hour: '2-digit', minute: '2-digit' }).format(date);
 
-function describe(event) {
-  const lines = [`📅 ${event.subject}`, `🕐 ${time(event.start)}–${time(event.end)}`];
+function describe(event, finished = false) {
+  const lines = [finished ? `✔️ ${event.subject} (finished)` : `📅 ${event.subject}`, `🕐 ${time(event.start)}–${time(event.end)}`];
   if (event.location) lines.push(`📍 ${event.location}`);
   if (event.joinUrl) lines.push(`🔗 ${event.joinUrl}`);
   return lines.join('\n');
@@ -61,15 +61,63 @@ export function formatAlert(events, now) {
   return [header, ...events.map((e) => (events.length === 1 ? describe(e) : `${describe(e)}\n(${startsIn(e, now)})`))].join('\n\n');
 }
 
-export function formatAgenda(events, now) {
-  const timed = events.filter((e) => !e.isAllDay && e.end > now);
-  const allDay = events.filter((e) => e.isAllDay);
-  if (timed.length + allDay.length === 0) return '📅 No more meetings today.';
+// The periods /calendar can show: today, tomorrow, or this week (Monday to Sunday).
+export const AGENDA_RANGES = {
+  today: { title: 'Today', empty: '📅 No meetings today.', from: (now) => startOfDay(now), to: (now) => startOfDay(now, 1) },
+  tomorrow: { title: 'Tomorrow', empty: '📅 No meetings tomorrow.', from: (now) => startOfDay(now, 1), to: (now) => startOfDay(now, 2) },
+  week: { title: 'This week', empty: '📅 No meetings this week.', from: (now) => startOfWeek(now), to: (now) => startOfWeek(now, 7) },
+};
 
-  const parts = [`📅 Rest of today (${timed.length + allDay.length})`];
-  if (allDay.length) parts.push(allDay.map((e) => `🗓 All day: ${e.subject}`).join('\n'));
-  parts.push(...timed.map(describe));
-  return parts.join('\n\n');
+// Reads "today", "tomorrow" or "week" (and a few short forms). Empty means today; unknown gives null.
+export function parseAgendaRange(arg) {
+  const word = arg.trim().toLowerCase();
+  if (['', 'today', 'วันนี้'].includes(word)) return 'today';
+  if (['tomorrow', 'tmr', 'พรุ่งนี้'].includes(word)) return 'tomorrow';
+  if (['week', '7', '7d', 'next7', 'สัปดาห์'].includes(word)) return 'week';
+  return null;
+}
+
+const dayLabel = (date) =>
+  new Intl.DateTimeFormat('en-GB', { timeZone: config.calendar.timezone, weekday: 'short', day: 'numeric', month: 'short' }).format(date);
+
+// LINE allows 5,000 characters per message; keep room for the "more" note.
+const AGENDA_MAX_CHARS = 4700;
+
+export function formatAgenda(events, now, range = 'today') {
+  const { title, empty, from } = AGENDA_RANGES[range];
+  const start = from(now);
+  // Finished meetings are listed too, marked ✔️.
+  const shown = events;
+  if (shown.length === 0) return empty;
+
+  // Group by the day each event starts on (events already under way count from the start of the period).
+  const days = new Map();
+  for (const e of shown) {
+    const label = dayLabel(e.start > start ? e.start : start);
+    if (!days.has(label)) days.set(label, { allDay: [], timed: [] });
+    days.get(label)[e.isAllDay ? 'allDay' : 'timed'].push(e);
+  }
+
+  const headers = {
+    today: `📅 Today, ${dayLabel(start)} (${shown.length})`,
+    tomorrow: `📅 Tomorrow, ${dayLabel(start)} (${shown.length})`,
+    week: `📅 This week, ${dayLabel(start)} – ${dayLabel(startOfWeek(now, 6))} (${shown.length})`,
+  };
+  const header = headers[range] ?? `📅 ${title} (${shown.length})`;
+  const parts = [header];
+  for (const [label, { allDay, timed }] of days) {
+    if (range === 'week') parts.push(`━━ ${label} ━━`);
+    if (allDay.length) parts.push(allDay.map((e) => `🗓 All day: ${e.subject}`).join('\n'));
+    parts.push(...timed.map((e) => describe(e, e.end <= now)));
+  }
+
+  let text = '';
+  for (let i = 0; i < parts.length; i++) {
+    const next = text ? `${text}\n\n${parts[i]}` : parts[i];
+    if (next.length > AGENDA_MAX_CHARS) return `${text}\n\n…and more. Open Outlook to see everything.`;
+    text = next;
+  }
+  return text;
 }
 
 // The calendar time zone's wall-clock date and UTC offset at `date`.
@@ -83,6 +131,19 @@ function zoned(date) {
   );
   const wallClockAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
   return { ...parts, offsetMs: wallClockAsUtc - Math.floor(date.getTime() / 1000) * 1000 };
+}
+
+// Midnight at the start of the day `days` from today, in the calendar's time zone.
+export function startOfDay(now, days = 0) {
+  const { year, month, day } = zoned(now);
+  return zonedToUtc(year, month, day + days, 0, 0);
+}
+
+// Midnight at the start of this week's Monday (plus `days`), in the calendar's time zone.
+export function startOfWeek(now, days = 0) {
+  const { year, month, day } = zoned(now);
+  const sinceMonday = (new Date(Date.UTC(year, month - 1, day)).getUTCDay() + 6) % 7;
+  return zonedToUtc(year, month, day - sinceMonday + days, 0, 0);
 }
 
 // Midnight tonight in the calendar's time zone.

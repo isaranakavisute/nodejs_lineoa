@@ -58,7 +58,7 @@ test('/menu and menu tiles show buttons; other users get nothing private', async
   await text('/menu');
   assert.deepEqual(last().buttons.map((b) => b.label), ['📬 Inbox', '✉️ Email', '📅 Calendar', '📘 Facebook', '💬 Chat / Translate', '❓ Help']);
   await tap('menu=calendar');
-  assert.deepEqual(last().buttons.map((b) => b.label), ["📋 Today's meetings", '➕ Add a meeting', '↩️ Undo last added', '❓ Calendar help']);
+  assert.deepEqual(last().buttons.map((b) => b.label), ['📋 Today', '🌅 Tomorrow', '🗓 Week', '➕ Add a meeting', '↩️ Undo last added', '❓ Calendar help']);
 
   const before = replies.length;
   await tap('menu=calendar', { type: 'user', userId: 'Ustranger' });

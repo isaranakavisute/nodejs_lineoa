@@ -58,7 +58,9 @@ const SUB_MENUS = {
   calendar: {
     text: '📅 Calendar',
     options: [
-      { label: "📋 Today's meetings", cmd: '/calendar' },
+      { label: '📋 Today', cmd: '/calendar today' },
+      { label: '🌅 Tomorrow', cmd: '/calendar tomorrow' },
+      { label: '🗓 Week', cmd: '/calendar week' },
       { label: '➕ Add a meeting', flow: 'meet' },
       { label: '↩️ Undo last added', cmd: '/meet undo' },
       { label: '❓ Calendar help', cmd: '/calendarhelp' },

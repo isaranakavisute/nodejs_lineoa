@@ -119,7 +119,7 @@ Platforms that inject `PORT` are supported automatically.
 
 Send `/calendarhelp` (or `/calhelp`) in LINE for a guide to all calendar commands.
 
-The bot can check your Outlook calendar every minute and send you a LINE message 1 hour before each meeting. This does not use Claude. Declined, cancelled and all-day events are skipped, and meetings starting at the same time are combined into one message. Each alert is a push message and counts toward your LINE plan's monthly quota. Send `/calendar` to the bot to see the rest of today's meetings; that's a reply, so it's free. Only the owner (`CALENDAR_ALERT_TO`) can use it.
+The bot can check your Outlook calendar every minute and send you a LINE message 1 hour before each meeting. This does not use Claude. Declined, cancelled and all-day events are skipped, and meetings starting at the same time are combined into one message. Each alert is a push message and counts toward your LINE plan's monthly quota. Send `/calendar` to the bot to see all of today's meetings (finished ones marked ✔️), `/calendar tomorrow` for tomorrow, or `/calendar week` for this week (Monday to Sunday) grouped by day (buttons under the reply switch between them); that's a reply, so it's free. Only the owner (`CALENDAR_ALERT_TO`) can use it.
 
 For testing, the owner can also add meetings from LINE (replies, so free):
 

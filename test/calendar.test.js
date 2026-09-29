@@ -96,3 +96,50 @@ test('/meet parses times in Bangkok', async () => {
   assert.equal(parseMeetCommand('lunch with Bob', now).error, 'time');
   assert.equal(parseMeetCommand('25:00 Bad', now).error, 'time');
 });
+
+test('/calendar today, tomorrow and week cover the right periods in Bangkok', async () => {
+  const { AGENDA_RANGES, parseAgendaRange } = await import('../src/calendar.js');
+  assert.equal(parseAgendaRange(''), 'today');
+  assert.equal(parseAgendaRange('Tomorrow'), 'tomorrow');
+  assert.equal(parseAgendaRange('week'), 'week');
+  assert.equal(parseAgendaRange('month'), null);
+
+  const late = at('2026-09-28T18:00:00Z'); // 01:00 on 29 Sep in Bangkok
+  const iso = (range, which) => AGENDA_RANGES[range][which](late).toISOString();
+  assert.equal(iso('today', 'from'), '2026-09-28T17:00:00.000Z');
+  assert.equal(iso('today', 'to'), '2026-09-29T17:00:00.000Z');
+  assert.equal(iso('tomorrow', 'from'), '2026-09-29T17:00:00.000Z');
+  assert.equal(iso('tomorrow', 'to'), '2026-09-30T17:00:00.000Z');
+  // 29 Sep 2026 is a Tuesday: the week runs Mon 28 Sep 00:00 to Mon 5 Oct 00:00 Bangkok time.
+  assert.equal(iso('week', 'from'), '2026-09-27T17:00:00.000Z');
+  assert.equal(iso('week', 'to'), '2026-10-04T17:00:00.000Z');
+  // On a Sunday night it is still the same week; a minute after midnight Monday a new one starts.
+  const sunday = at('2026-10-04T16:59:00Z');
+  assert.equal(AGENDA_RANGES.week.from(sunday).toISOString(), '2026-09-27T17:00:00.000Z');
+  assert.equal(AGENDA_RANGES.week.from(at('2026-10-04T17:01:00Z')).toISOString(), '2026-10-04T17:00:00.000Z');
+});
+
+test('agenda: tomorrow is titled with its date, week is grouped by day, finished meetings hidden', async () => {
+  const { formatAgenda } = await import('../src/calendar.js');
+  const tomorrow = formatAgenda([event('a', '2026-09-29T03:00:00Z')], now, 'tomorrow');
+  assert.match(tomorrow, /^📅 Tomorrow, Tue 29 Sept? \(1\)[\s\S]*Meeting a[\s\S]*10:00–10:30/);
+  assert.equal(formatAgenda([], now, 'tomorrow'), '📅 No meetings tomorrow.');
+
+  // Today lists the whole day, marking meetings that have already ended (now is 09:00 Bangkok).
+  const today = formatAgenda([event('early', '2026-09-28T01:00:00Z'), event('later', '2026-09-28T07:00:00Z')], now, 'today');
+  assert.match(today, /^📅 Today, Mon 28 Sept? \(2\)\n\n✔️ Meeting early \(finished\)\n🕐 08:00–08:30\n\n📅 Meeting later/);
+  assert.equal(formatAgenda([], now, 'today'), '📅 No meetings today.');
+
+  const week = formatAgenda([
+    event('done', '2026-09-28T01:00:00Z'),
+    event('mon', '2026-09-28T07:00:00Z'),
+    event('wed', '2026-09-30T02:00:00Z'),
+    event('hol', '2026-09-30T00:00:00Z', { isAllDay: true, subject: 'Holiday' }),
+  ], now, 'week');
+  assert.match(week, /^📅 This week, Mon 28 Sept? – Sun 4 Oct \(4\)\n\n━━ Mon 28 Sept? ━━\n\n✔️ Meeting done \(finished\)[\s\S]*📅 Meeting mon[\s\S]*━━ Wed 30 Sept? ━━\n\n🗓 All day: Holiday\n\n📅 Meeting wed/);
+
+  const many = Array.from({ length: 80 }, (_, i) => event(`m${i}`, '2026-09-29T03:00:00Z', { location: 'Room '.repeat(10) }));
+  const long = formatAgenda(many, now, 'week');
+  assert.ok(long.length <= 5000);
+  assert.match(long, /…and more/);
+});

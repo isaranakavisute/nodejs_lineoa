@@ -6,7 +6,7 @@ import { chat, ChatRefused } from './chat.js';
 import { downloadImage, askAboutImage, ImageTooLarge, UnsupportedImage, AnswerRefused } from './vision.js';
 import { getDigest, DigestRefused } from './news.js';
 import { subscribe, unsubscribe, getSubscription } from './store.js';
-import { fetchEvents, formatAgenda, endOfToday, parseMeetCommand, createEvent, deleteEvent, formatDateTime } from './calendar.js';
+import { fetchEvents, formatAgenda, AGENDA_RANGES, parseAgendaRange, parseMeetCommand, createEvent, deleteEvent, formatDateTime } from './calendar.js';
 import { NotSignedIn, NoWriteAccess, hasPermission, isSignedIn } from './microsoft.js';
 import { parseEmailCommand, sendEmail } from './mail.js';
 import { fetchUnreadToday, formatInbox } from './inbox.js';
@@ -111,9 +111,11 @@ I message you ${config.calendar.leadMinutes} minutes before each meeting in your
 • Meetings starting close together come in one message
 • Each alert uses 1 message from your LINE monthly quota
 
-📋 TODAY'S MEETINGS
-/calendar
-Shows the rest of today's meetings: title, time, place and online meeting link.
+📋 SEE YOUR MEETINGS
+/calendar – all of today (finished meetings marked ✔️)
+/calendar tomorrow – all of tomorrow
+/calendar week – this week, Monday to Sunday, by day
+Shows title, time, place and online meeting link. Tap the buttons underneath to switch.
 
 ➕ ADD A MEETING
 /meet in 30 Test – starts in 30 minutes
@@ -396,7 +398,7 @@ function handleCommand({ name, arg }, replyToken, id, source) {
     return reply(replyToken, `Your LINE user ID:\n${source.userId}`);
   }
   if (name === 'calendar') {
-    return handleCalendarCommand(replyToken, source);
+    return handleCalendarCommand(arg, replyToken, source);
   }
   if (name === 'meet') {
     return handleMeetCommand(arg, replyToken, source);
@@ -604,11 +606,22 @@ async function handleEmailCommand(name, arg, replyToken, source) {
   );
 }
 
-async function handleCalendarCommand(replyToken, source) {
+// Buttons under every agenda, to switch between periods.
+const AGENDA_BUTTONS = [
+  { label: '📋 Today', cmd: '/calendar today' },
+  { label: '🌅 Tomorrow', cmd: '/calendar tomorrow' },
+  { label: '🗓 Week', cmd: '/calendar week' },
+  { label: '➕ Add a meeting', flow: 'meet' },
+];
+
+async function handleCalendarCommand(arg, replyToken, source) {
   if (!isCalendarOwner(source)) return reply(replyToken, HELP_TEXT);
+  const range = parseAgendaRange(arg);
+  if (!range) return replyWithOptions(replyToken, '📅 Which meetings? /calendar today, /calendar tomorrow or /calendar week', AGENDA_BUTTONS);
   try {
     const now = new Date();
-    return reply(replyToken, formatAgenda(await fetchEvents(now, endOfToday(now)), now));
+    const { from, to } = AGENDA_RANGES[range];
+    return replyWithOptions(replyToken, formatAgenda(await fetchEvents(from(now), to(now)), now, range), AGENDA_BUTTONS);
   } catch (err) {
     if (err instanceof NotSignedIn) return reply(replyToken, '📅 Not connected to your calendar. Run "npm run microsoft-login" on the server.');
     console.error('Calendar lookup failed:', err.message);
