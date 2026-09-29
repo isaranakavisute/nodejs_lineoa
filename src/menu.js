@@ -6,6 +6,8 @@ import { config } from './config.js';
 import { parseEmailCommand } from './mail.js';
 import { parseMeetCommand, formatDateTime } from './calendar.js';
 import { runCommand, rememberImage } from './handlers.js';
+import { REPLY_TEMPLATES, FORWARD_NOTES, otherRecipients, composeReply, composeForwardNote, sendReply, sendForward } from './mailActions.js';
+import { NotSignedIn, NoWriteAccess } from './microsoft.js';
 
 // A guided flow in progress, per owner: { flow, step, data, expiresAt }.
 const flows = new Map();
@@ -31,15 +33,13 @@ function toAction(option) {
   return { type: 'postback', label, data: new URLSearchParams(data).toString(), displayText: option.label };
 }
 
+// Quick-reply buttons for a LINE message (LINE allows up to 13).
+export function quickReply(options) {
+  return { items: options.slice(0, 13).map((o) => ({ type: 'action', action: toAction(o) })) };
+}
+
 export function replyWithOptions(replyToken, text, options) {
-  return client.replyMessage({
-    replyToken,
-    messages: [{
-      type: 'text',
-      text,
-      quickReply: { items: options.slice(0, 13).map((o) => ({ type: 'action', action: toAction(o) })) },
-    }],
-  });
+  return client.replyMessage({ replyToken, messages: [{ type: 'text', text, quickReply: quickReply(options) }] });
 }
 
 // ---- Menus ----
@@ -143,19 +143,34 @@ const STEPS = {
   lang: {
     lang: ['🌐 Which language should I translate into? Type its name (e.g. Vietnamese, French, ภาษาลาว).', [CANCEL]],
   },
+  // Reply / Reply all / Forward for an email from /inbox; data.email is the email, data.all for Reply all.
+  reply: {
+    compose: ({ email, all }) => [
+      `${all ? '👥 Reply all' : '↩️ Reply'} to:\n${email.subject}\nFrom: ${email.from}${all ? `\n${replyAllNote(email)}` : ''}\n\nTap a standard response, or type your own reply.`,
+      [...REPLY_TEMPLATES.map((t, i) => ({ label: t.label, data: { wiz: 'tpl', i } })), { label: '✍️ Write my own', data: { wiz: 'own' } }, CANCEL],
+    ],
+    own: ['✍️ Type your reply, including the greeting and sign-off you want.', [{ label: '⬅️ Other responses', data: { wiz: 'back' } }, CANCEL]],
+  },
+  forward: {
+    to: ({ email }) => [`➡️ Forward:\n${email.subject}\n\nWho should I forward it to? Type an email address (several: separate with commas).`, [CANCEL]],
+    note: ['Add a note above the forwarded email? Tap one, type your own, or tap No note.', [
+      ...FORWARD_NOTES.map((n, i) => ({ label: n.label, data: { wiz: 'tpl', i } })), { label: 'No note', data: { wiz: 'skip' } }, CANCEL,
+    ]],
+  },
 };
 
-const FIRST_STEP = { email: 'to', meet: 'when', fbtext: 'text', fbphoto: 'photo', lang: 'lang' };
+const FIRST_STEP = { email: 'to', meet: 'when', fbtext: 'text', fbphoto: 'photo', lang: 'lang', reply: 'compose', forward: 'to' };
 
-function ask(replyToken, flow, step, prefix = '') {
-  const [text, options] = STEPS[flow][step];
+function ask(replyToken, flow, step, prefix = '', data = {}) {
+  const question = STEPS[flow][step];
+  const [text, options] = typeof question === 'function' ? question(data) : question;
   return replyWithOptions(replyToken, `${prefix}${text}`, options);
 }
 
-export function startFlow(flow, replyToken, userId) {
+export function startFlow(flow, replyToken, userId, data = {}) {
   if (!FIRST_STEP[flow]) return showMenu('main', replyToken);
-  flows.set(userId, { flow, step: FIRST_STEP[flow], data: {}, expiresAt: Date.now() + FLOW_MS });
-  return ask(replyToken, flow, FIRST_STEP[flow]);
+  flows.set(userId, { flow, step: FIRST_STEP[flow], data, expiresAt: Date.now() + FLOW_MS });
+  return ask(replyToken, flow, FIRST_STEP[flow], '', data);
 }
 
 export function endFlow(userId) {
@@ -189,7 +204,7 @@ export async function handleFlowText(text, replyToken, source) {
   state.expiresAt = Date.now() + FLOW_MS;
   const next = (nextStep, prefix) => {
     state.step = nextStep;
-    return ask(replyToken, flow, nextStep, prefix);
+    return ask(replyToken, flow, nextStep, prefix, data);
   };
 
   if (flow === 'email') {
@@ -250,7 +265,91 @@ export async function handleFlowText(text, replyToken, source) {
     return finish(userId, `/lang ${answer}`, replyToken, source);
   }
 
+  if (flow === 'reply') {
+    // Typed text is the whole reply, at any step (typing at the preview replaces it).
+    if (!answer) return ask(replyToken, flow, step === 'own' ? 'own' : 'compose', '', data);
+    data.text = answer;
+    return previewMail(state, replyToken);
+  }
+
+  if (flow === 'forward') {
+    if (step === 'to') {
+      const check = parseEmailCommand(`${answer}\nsubject\nbody`);
+      if (check.error) return ask(replyToken, flow, 'to', `⚠️ ${check.detail ? `"${check.detail}" isn't an email address.` : 'Please type an email address.'}\n\n`, data);
+      data.to = check.to;
+      return next('note');
+    }
+    // A typed note (or none, from No note); typing at the preview replaces the note.
+    data.text = answer;
+    return previewMail(state, replyToken);
+  }
+
   return false;
+}
+
+// ---- Reply / forward ----
+
+// Who else Reply all reaches, in words.
+function replyAllNote(email) {
+  const others = otherRecipients(email);
+  if (others === 0) return '(no one else was on this email, so only the sender gets your reply)';
+  return `(also to ${others === 1 ? '1 other person' : `${others} other people`} in To/Cc)`;
+}
+
+const SEND_BUTTONS = [{ label: '✅ Send', data: { wiz: 'confirm' } }, CANCEL];
+
+function previewMail(state, replyToken) {
+  const { flow, data } = state;
+  state.step = 'confirm';
+  const text = data.text.length > 1500 ? `${data.text.slice(0, 1500)}…` : data.text;
+  if (flow === 'forward') {
+    return replyWithOptions(
+      replyToken,
+      `➡️ Ready to forward:\n\nTo: ${data.to.join(', ')}\nSubject: FW: ${data.email.subject}\n\n${text || '(no note)'}\n\n(The original email is included below your note.)\n👉 Tap ✅ Send, type a new note to change it, or ❌ Cancel.`,
+      SEND_BUTTONS,
+    );
+  }
+  return replyWithOptions(
+    replyToken,
+    `${data.all ? '👥 Ready to reply to all' : '↩️ Ready to reply'}:\n\nTo: ${data.email.from}${data.all && otherRecipients(data.email) ? ' and everyone in To/Cc' : ''}\nSubject: RE: ${data.email.subject}\n\n${text}\n\n(The original email is quoted below your reply.)\n👉 Tap ✅ Send, type a new reply to change it, or ❌ Cancel.`,
+    [SEND_BUTTONS[0], { label: '⬅️ Other responses', data: { wiz: 'back' } }, CANCEL],
+  );
+}
+
+async function sendMail(state, replyToken, userId) {
+  const { flow, data } = state;
+  flows.delete(userId);
+  const again = [{ label: '📬 Inbox', cmd: '/inbox' }, { label: '📋 Menu', menu: 'main' }];
+  try {
+    if (flow === 'forward') {
+      await sendForward(data.email.id, data.to, data.text);
+      return replyWithOptions(replyToken, `✅ Forwarded "${data.email.subject}" to ${data.to.join(', ')}.\nA copy is in your Sent folder.`, again);
+    }
+    await sendReply(data.email.id, data.text, { all: data.all });
+    return replyWithOptions(replyToken, `✅ ${data.all ? 'Replied to all' : 'Replied'}: "${data.email.subject}".\nA copy is in your Sent folder.`, again);
+  } catch (err) {
+    if (err instanceof NotSignedIn) return replyWithOptions(replyToken, '✉️ Not connected to your Outlook account. Run "npm run microsoft-login" on the server.', again);
+    if (err instanceof NoWriteAccess) return replyWithOptions(replyToken, '✉️ The bot isn’t allowed to send email yet. Run "npm run microsoft-login" on the server and approve the new permission.', again);
+    console.error(`Email ${flow} failed:`, err.message);
+    return replyWithOptions(replyToken, 'The email could not be sent (it may have been deleted or moved). Nothing was sent; please try again later.', again);
+  }
+}
+
+// A standard response (Reply) or note (Forward) was tapped.
+function useTemplate(state, index, replyToken) {
+  const { flow, data } = state;
+  if (flow === 'reply') {
+    const template = REPLY_TEMPLATES[index];
+    if (!template) return ask(replyToken, flow, 'compose', '', data);
+    // "Dear all" only when the reply really goes to several people.
+    const group = data.all && otherRecipients(data.email) > 0;
+    data.text = composeReply(template, { all: group, senderName: data.email.fromName });
+  } else {
+    const note = FORWARD_NOTES[index];
+    if (!note) return ask(replyToken, flow, 'note', '', data);
+    data.text = composeForwardNote(note);
+  }
+  return previewMail(state, replyToken);
 }
 
 // Handles a photo sent during a flow. Returns false if no flow is waiting for a photo.
@@ -287,12 +386,19 @@ export async function handlePostback(event) {
     return replyWithOptions(replyToken, hadFlow ? '❌ Cancelled. Nothing was sent.' : 'Nothing to cancel.', [{ label: '📋 Menu', menu: 'main' }]);
   }
   if (wiz === 'skip') return handleFlowText(SKIP, replyToken, source);
+  const state = activeFlow(source.userId);
+  const mailFlow = state?.flow === 'reply' || state?.flow === 'forward';
+  if (mailFlow && wiz === 'tpl') return useTemplate(state, Number(params.get('i')), replyToken);
+  if (state?.flow === 'reply' && (wiz === 'own' || wiz === 'back')) {
+    state.step = wiz === 'own' ? 'own' : 'compose';
+    return ask(replyToken, 'reply', state.step, '', state.data);
+  }
   if (wiz === 'confirm') {
-    const state = activeFlow(source.userId);
     if (state?.flow === 'meet' && state.step === 'confirm') {
       const { when, length, title } = state.data;
       return finish(source.userId, `/meet ${when} ${length} ${title}`, replyToken, source);
     }
+    if (mailFlow && state.step === 'confirm') return sendMail(state, replyToken, source.userId);
     return replyWithOptions(replyToken, 'That has expired. Start again from the menu.', [{ label: '📋 Menu', menu: 'main' }]);
   }
   return showMenu('main', replyToken);

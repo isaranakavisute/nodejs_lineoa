@@ -39,6 +39,10 @@ export const config = {
     leadMinutes: Number(process.env.CALENDAR_ALERT_MINUTES) || 60,
     timezone: process.env.CALENDAR_TIMEZONE || 'Asia/Bangkok',
   },
+  email: {
+    // Name under the standard email responses ("Best Regards," + this). Empty = no name.
+    signature: process.env.EMAIL_SIGNATURE ?? 'Isara Nakavisute',
+  },
   facebook: {
     // The Facebook Page the owner can post to from LINE (/fb). See README "Posting to Facebook".
     pageId: process.env.FACEBOOK_PAGE_ID || '',

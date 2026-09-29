@@ -187,6 +187,8 @@ Send `/emailhelp` (or `/mailhelp`) in LINE for a guide to all email commands. Th
 
 The owner can send `/inbox` (or `/mail`) to get today's unread emails from their Outlook **Inbox and Junk Email** folders. It needs the `Mail.Read` permission, doesn't use Claude, and is a reply, so no LINE quota is used. Checking does **not** mark emails as read.
 
+Under the list are buttons to **reply, reply to all or forward**. With several emails, tap an email's number first; you can also type `/inbox 2`, `/reply 2`, `/replyall 2` or `/forward 2`. For a reply, tap a standard response such as *"Your message is well received. I will get back to you."* (the greeting "Dear <sender>," / "Dear all," and "Best Regards, <EMAIL_SIGNATURE>" are added) or type your own. For a forward, type the address, then pick a note (FYI, Please review, Please handle) or type one. You always see a preview, and nothing is sent until you tap ✅ Send. The reply is plain text with the original email quoted underneath, and a copy is saved in Sent Items. This uses only `Mail.Send`, so there's no need to sign in again. Edit the responses in `REPLY_TEMPLATES` and `FORWARD_NOTES` in `src/mailActions.js`.
+
 The reply shows how many unread emails arrived since midnight (`CALENDAR_TIMEZONE`), split by folder, then for each one, newest first (junk marked ⚠️ [Junk]): subject, sender, recipients (To and Cc), the time it was sent, and the first 5 lines of the message. Up to 30 emails are listed; if there are more, the reply says so. If you signed in before this was added, run `npm run microsoft-login` again to approve reading mail.
 
 ## Posting to Facebook (Page)
@@ -264,6 +266,7 @@ The user ID (`U...`) appears in webhook events (`event.source.userId`) and is al
 | `src/calendarScheduler.js` | Checks the calendar every minute and sends alerts |
 | `src/mail.js` | Parses and sends email through Outlook |
 | `src/inbox.js` | Lists today's unread emails (Inbox and Junk) |
+| `src/mailActions.js` | Reply / reply all / forward with standard responses |
 | `src/facebook.js` | Posts text and photos to your Facebook Page |
 | `src/menu.js` | Owner menu: button taps, sub-menus and step-by-step guides |
 | `src/line.js` | Shared Messaging API client |

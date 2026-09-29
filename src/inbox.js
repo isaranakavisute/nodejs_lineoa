@@ -37,7 +37,9 @@ async function fetchUnreadInFolder(folder, now) {
   return {
     hasMore: Boolean(result['@odata.nextLink']),
     emails: result.value.map((m) => ({
+      id: m.id,
       folder: folder.name,
+      fromName: m.from?.emailAddress?.name ?? '',
       from: formatAddress(m.from?.emailAddress),
       to: (m.toRecipients ?? []).map((r) => formatAddress(r.emailAddress)),
       cc: (m.ccRecipients ?? []).map((r) => formatAddress(r.emailAddress)),
@@ -60,6 +62,18 @@ export async function fetchUnreadToday(now) {
     hasMore: all.length > MAX_EMAILS || results.some((r) => r.hasMore),
     counts,
   };
+}
+
+// The emails shown by the last /inbox, so "/reply 2" etc. know which email is meant.
+let listed = [];
+
+export function rememberListed(emails) {
+  listed = emails;
+}
+
+// The nth email (1-based) from the last /inbox, or null.
+export function listedEmail(n) {
+  return listed[n - 1] ?? null;
 }
 
 function formatAddress(address) {

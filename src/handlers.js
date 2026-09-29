@@ -9,9 +9,9 @@ import { subscribe, unsubscribe, getSubscription } from './store.js';
 import { fetchEvents, formatAgenda, AGENDA_RANGES, parseAgendaRange, parseMeetCommand, createEvent, deleteEvent, formatDateTime } from './calendar.js';
 import { NotSignedIn, NoWriteAccess, hasPermission, isSignedIn } from './microsoft.js';
 import { parseEmailCommand, sendEmail } from './mail.js';
-import { fetchUnreadToday, formatInbox } from './inbox.js';
+import { fetchUnreadToday, formatInbox, rememberListed, listedEmail } from './inbox.js';
 import { parseFacebookPost, postText, postPhoto, isFacebookConfigured, FacebookNotConfigured, FacebookTokenInvalid } from './facebook.js';
-import { replyWithOptions, handlePostback, handleFlowText, handleFlowImage, endFlow, showMenu, isOwner } from './menu.js';
+import { replyWithOptions, quickReply, handlePostback, handleFlowText, handleFlowImage, endFlow, startFlow, showMenu, isOwner } from './menu.js';
 
 // A Facebook post waiting for the owner to confirm with /post: { message, link?, image?, expiresAt }.
 let pendingFacebookPost = null;
@@ -71,6 +71,16 @@ Shows today's unread emails from your Inbox and Junk folders:
 • for each one: subject, sender, recipients (To/Cc), time sent, and the first 5 lines
 • junk is marked ⚠️ [Junk]
 Checking never marks emails as read.
+
+↩️ REPLY / FORWARD
+Tap the buttons under the list, or type the email's number:
+/inbox 2 – show email 2 with Reply / Reply all / Forward buttons
+/reply 2 – reply to the sender
+/replyall 2 – reply to everyone
+/forward 2 – forward it (I ask who to send it to)
+• Tap a standard response (e.g. "Your message is well received…") or type your own
+• I show a preview first; nothing is sent until you tap ✅ Send
+• The original email is quoted underneath, as in Outlook
 
 ✉️ SEND EMAIL
 Write three lines in one message:
@@ -404,7 +414,10 @@ function handleCommand({ name, arg }, replyToken, id, source) {
     return handleMeetCommand(arg, replyToken, source);
   }
   if (name === 'inbox' || name === 'mail') {
-    return handleInboxCommand(replyToken, source);
+    return arg ? handleInboxEmailCommand(arg, replyToken, source) : handleInboxCommand(replyToken, source);
+  }
+  if (name === 'reply' || name === 'replyall' || name === 'forward' || name === 'fwd') {
+    return handleMailActionCommand(name, arg, replyToken, source);
   }
   if (name === 'cancel') {
     return handleCancelCommand(replyToken, source);
@@ -501,13 +514,60 @@ async function handleInboxCommand(replyToken, source) {
   if (missing) return reply(replyToken, `📬 ${missing}`);
   showLoading(source);
   try {
-    const texts = formatInbox(await fetchUnreadToday(new Date()));
-    return client.replyMessage({ replyToken, messages: texts.map((text) => ({ type: 'text', text })) });
+    const result = await fetchUnreadToday(new Date());
+    rememberListed(result.emails);
+    const messages = formatInbox(result).map((text) => ({ type: 'text', text }));
+    // Buttons under the list: act on the only email directly, or pick which email first.
+    const buttons = result.emails.length === 1
+      ? mailActionButtons(1)
+      : result.emails.map((e, i) => ({ label: `${i + 1}. ${e.subject}`, cmd: `/inbox ${i + 1}` }));
+    if (buttons.length) messages.at(-1).quickReply = quickReply(buttons);
+    return client.replyMessage({ replyToken, messages });
   } catch (err) {
     if (err instanceof NotSignedIn) return reply(replyToken, '📬 Not connected to your Outlook account. Run "npm run microsoft-login" on the server.');
     console.error('Inbox check failed:', err.message);
     return reply(replyToken, 'Could not check your email right now. Please try again later.');
   }
+}
+
+const mailActionButtons = (n) => [
+  { label: '↩️ Reply', cmd: `/reply ${n}` },
+  { label: '👥 Reply all', cmd: `/replyall ${n}` },
+  { label: '➡️ Forward', cmd: `/forward ${n}` },
+];
+
+// The email numbered `arg` in the last /inbox list, or a reply explaining why there isn't one.
+function pickListedEmail(arg, replyToken) {
+  const n = Number(arg);
+  const email = Number.isInteger(n) && n > 0 ? listedEmail(n) : null;
+  if (!email) {
+    return { n, error: replyWithOptions(replyToken, `📬 I can't find email ${arg || '(no number)'}. Send /inbox to list your emails, then use its number, e.g. /reply 1.`, [{ label: '📬 Inbox', cmd: '/inbox' }]) };
+  }
+  return { n, email };
+}
+
+// /inbox 2: one email from the list, with Reply / Reply all / Forward buttons.
+function handleInboxEmailCommand(arg, replyToken, source) {
+  if (!isCalendarOwner(source)) return reply(replyToken, HELP_TEXT);
+  const { n, email, error } = pickListedEmail(arg, replyToken);
+  if (error) return error;
+  const cc = email.cc.length ? `\nCc: ${email.cc.join(', ')}` : '';
+  return replyWithOptions(
+    replyToken,
+    `✉️ Email ${n}\n${email.subject}\nFrom: ${email.from}\nTo: ${email.to.join(', ') || '(none)'}${cc}\n\nWhat would you like to do?`,
+    mailActionButtons(n),
+  );
+}
+
+// /reply 2, /replyall 2, /forward 2: start the guided reply or forward for that email.
+function handleMailActionCommand(name, arg, replyToken, source) {
+  if (!isCalendarOwner(source)) return reply(replyToken, HELP_TEXT);
+  const missing = missingMicrosoftAccess('Mail.Send', 'send email');
+  if (missing) return reply(replyToken, `✉️ ${missing}`);
+  const { email, error } = pickListedEmail(arg, replyToken);
+  if (error) return error;
+  if (name === 'forward' || name === 'fwd') return startFlow('forward', replyToken, source.userId, { email });
+  return startFlow('reply', replyToken, source.userId, { email, all: name === 'replyall' });
 }
 
 // /cancel discards whatever is waiting for confirmation (an email and/or a Facebook post).
