@@ -11,7 +11,8 @@
     "check": "node scripts/check.js",
     "translate": "node scripts/translate.js",
     "news": "node scripts/news.js",
-    "microsoft-login": "node scripts/microsoft-login.js"
+    "microsoft-login": "node scripts/microsoft-login.js",
+    "facebook-token": "node scripts/facebook-token.js"
   },
   "keywords": [],
   "author": "",

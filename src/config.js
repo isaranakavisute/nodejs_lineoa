@@ -39,6 +39,15 @@ export const config = {
     leadMinutes: Number(process.env.CALENDAR_ALERT_MINUTES) || 60,
     timezone: process.env.CALENDAR_TIMEZONE || 'Asia/Bangkok',
   },
+  facebook: {
+    // The Facebook Page the owner can post to from LINE (/fb). See README "Posting to Facebook".
+    pageId: process.env.FACEBOOK_PAGE_ID || '',
+    pageAccessToken: process.env.FACEBOOK_PAGE_ACCESS_TOKEN || '',
+    // Only needed once, to turn a short-lived token into a long-lived Page token (npm run facebook-token).
+    appId: process.env.FACEBOOK_APP_ID || '',
+    appSecret: process.env.FACEBOOK_APP_SECRET || '',
+    graphVersion: process.env.FACEBOOK_GRAPH_VERSION || 'v23.0',
+  },
   translation: {
     // Messages are translated into the target language; text already in it goes to the secondary.
     defaultTarget: process.env.DEFAULT_TARGET_LANGUAGE || 'English',

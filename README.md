@@ -189,6 +189,34 @@ The owner can send `/inbox` (or `/mail`) to get today's unread emails from their
 
 The reply shows how many unread emails arrived since midnight (`CALENDAR_TIMEZONE`), split by folder, then for each one, newest first (junk marked ⚠️ [Junk]): subject, sender, recipients (To and Cc), the time it was sent, and the first 5 lines of the message. Up to 30 emails are listed; if there are more, the reply says so. If you signed in before this was added, run `npm run microsoft-login` again to approve reading mail.
 
+## Posting to Facebook (Page)
+
+The owner can post to their **Facebook Page** from LINE. Facebook doesn't let apps post to personal profiles, so this only works with a Page. No Claude involved; replies only, so no LINE quota. Send `/fbhelp` in LINE for the command guide.
+
+| Send | Result |
+| --- | --- |
+| `/fb Your text` | Preview of a text post (a web address in it becomes a link preview) |
+| A photo, then `/fbphoto Caption` | Preview of a photo post (caption optional) |
+| `/post` | Publishes the previewed post and replies with its link |
+| `/cancel` | Discards it (also discards a pending email) |
+
+Nothing is published until you send `/post`; drafts expire after 10 minutes.
+
+### Setup (one time)
+
+1. **Create a Meta app:** <https://developers.facebook.com/apps> → **Create app** → use case **Other** → type **Business**. Leave it in **Development** mode.
+2. **Copy the App ID and App secret** (App settings → Basic) into `.env` as `FACEBOOK_APP_ID` and `FACEBOOK_APP_SECRET`.
+3. **Get a short-lived token:** open the [Graph API Explorer](https://developers.facebook.com/tools/explorer/), choose your app, click **Get User Access Token**, and tick `pages_show_list`, `pages_read_engagement` and `pages_manage_posts`. Approve access to your Page when Facebook asks, then copy the token.
+4. **Turn it into a Page token:**
+   ```sh
+   npm run facebook-token -- <paste the token>
+   ```
+   It prints `FACEBOOK_PAGE_ID` and a long-lived `FACEBOOK_PAGE_ACCESS_TOKEN` (expires: never). Put both in `.env` and restart the bot.
+
+The Page token stops working if you change your Facebook password, remove the app, or lose admin rights on the Page; run steps 3–4 again then. Keep the token secret: anyone with it can post to your Page.
+
+**Development mode:** posts made while the app is in Development mode may only be visible to people with a role on the app (you). After your first post, open it in a private browser window while logged out. If it isn't visible, switch the app to **Live** in the Meta dashboard (it asks for a privacy policy URL).
+
 ## Push messages
 
 ```sh
@@ -215,10 +243,12 @@ The user ID (`U...`) appears in webhook events (`event.source.userId`) and is al
 | `src/calendarScheduler.js` | Checks the calendar every minute and sends alerts |
 | `src/mail.js` | Parses and sends email through Outlook |
 | `src/inbox.js` | Lists today's unread emails (Inbox and Junk) |
+| `src/facebook.js` | Posts text and photos to your Facebook Page |
 | `src/line.js` | Shared Messaging API client |
 | `src/config.js` | Loads and validates environment variables |
 | `scripts/push.js` | CLI for sending push messages |
 | `scripts/translate.js` | CLI for testing translations |
 | `scripts/news.js` | CLI for previewing or sending the news digest |
 | `scripts/microsoft-login.js` | One-time Microsoft sign-in for calendar alerts |
+| `scripts/facebook-token.js` | Creates the long-lived Facebook Page token |
 | `scripts/check.js` | Verifies LINE credentials and webhook settings |

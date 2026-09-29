@@ -10,6 +10,32 @@ import { fetchEvents, formatAgenda, endOfToday, parseMeetCommand, createEvent, d
 import { NotSignedIn, NoWriteAccess, hasPermission, isSignedIn } from './microsoft.js';
 import { parseEmailCommand, sendEmail } from './mail.js';
 import { fetchUnreadToday, formatInbox } from './inbox.js';
+import { parseFacebookPost, postText, postPhoto, isFacebookConfigured, FacebookNotConfigured, FacebookTokenInvalid } from './facebook.js';
+
+// A Facebook post waiting for the owner to confirm with /post: { message, link?, image?, expiresAt }.
+let pendingFacebookPost = null;
+const FACEBOOK_CONFIRM_MS = 10 * 60 * 1000;
+
+const FACEBOOK_HELP = `📘 Facebook Page commands
+
+📝 TEXT POST
+/fb Your post text (can be several lines)
+• A web address in the text is shown as a link preview
+
+📷 PHOTO POST
+1. Send me a photo
+2. /fbphoto Your caption (caption is optional)
+
+✅ CONFIRM
+I reply with a preview first. Then:
+/post – publish it to your Page
+/cancel – discard it
+• A draft expires after 10 minutes
+• Published posts are public; delete them on Facebook if needed
+
+Posts go to your Facebook Page (Facebook doesn't allow apps to post to personal profiles).
+
+❓ /fbhelp – show this guide`;
 
 // Meetings the owner created with /meet, newest last, so /meet undo can delete them.
 const createdMeetings = [];
@@ -338,8 +364,17 @@ function handleCommand({ name, arg }, replyToken, id, source) {
   if (name === 'inbox' || name === 'mail') {
     return handleInboxCommand(replyToken, source);
   }
-  if (name === 'email' || name === 'send' || name === 'cancel') {
+  if (name === 'cancel') {
+    return handleCancelCommand(replyToken, source);
+  }
+  if (name === 'email' || name === 'send') {
     return handleEmailCommand(name, arg, replyToken, source);
+  }
+  if (name === 'fb' || name === 'fbphoto' || name === 'post') {
+    return handleFacebookCommand(name, arg, replyToken, source);
+  }
+  if (name === 'fbhelp') {
+    return reply(replyToken, isCalendarOwner(source) ? FACEBOOK_HELP : HELP_TEXT);
   }
   if (name === 'emailhelp' || name === 'mailhelp') {
     return reply(replyToken, isCalendarOwner(source) ? EMAIL_COMMANDS_HELP : HELP_TEXT);
@@ -357,7 +392,7 @@ function handleCommand({ name, arg }, replyToken, id, source) {
   }
   // Owner-only commands aren't listed for everyone; point the owner to them.
   if (isCalendarOwner(source)) {
-    return reply(replyToken, `${HELP_TEXT}\n\n🔒 Your private commands:\n/emailhelp – all email commands\n/calendarhelp – all calendar commands`);
+    return reply(replyToken, `${HELP_TEXT}\n\n🔒 Your private commands:\n/emailhelp – all email commands\n/calendarhelp – all calendar commands\n/fbhelp – Facebook Page posting`);
   }
   return reply(replyToken, HELP_TEXT);
 }
@@ -430,14 +465,63 @@ async function handleInboxCommand(replyToken, source) {
   }
 }
 
+// /cancel discards whatever is waiting for confirmation (an email and/or a Facebook post).
+function handleCancelCommand(replyToken, source) {
+  if (!isCalendarOwner(source)) return reply(replyToken, HELP_TEXT);
+  const discarded = [];
+  if (pendingEmail) discarded.push('email (not sent)');
+  if (pendingFacebookPost) discarded.push('Facebook post (not published)');
+  pendingEmail = null;
+  pendingFacebookPost = null;
+  return reply(replyToken, discarded.length ? `🗑 Discarded: ${discarded.join(' and ')}.` : 'There’s nothing waiting to be sent.');
+}
+
+async function handleFacebookCommand(name, arg, replyToken, source) {
+  if (!isCalendarOwner(source)) return reply(replyToken, HELP_TEXT);
+  if (!isFacebookConfigured()) {
+    return reply(replyToken, '📘 Facebook posting isn’t set up on this server yet. Add FACEBOOK_PAGE_ID and FACEBOOK_PAGE_ACCESS_TOKEN to .env (see README "Posting to Facebook") and restart.');
+  }
+
+  if (name === 'post') {
+    if (!pendingFacebookPost || Date.now() > pendingFacebookPost.expiresAt) {
+      pendingFacebookPost = null;
+      return reply(replyToken, 'There’s no Facebook post waiting to be published (drafts expire after 10 minutes).');
+    }
+    const draft = pendingFacebookPost;
+    pendingFacebookPost = null;
+    try {
+      const url = draft.image ? await postPhoto({ image: draft.image, caption: draft.message }) : await postText(draft);
+      return reply(replyToken, `✅ Posted to your Facebook Page:\n${url}`);
+    } catch (err) {
+      if (err instanceof FacebookTokenInvalid) {
+        return reply(replyToken, '📘 Facebook rejected the Page access token (expired or revoked). Create a new one with "npm run facebook-token" and update .env. Nothing was posted.');
+      }
+      if (err instanceof FacebookNotConfigured) return reply(replyToken, '📘 Facebook posting isn’t set up on this server yet.');
+      console.error('Facebook post failed:', err.message);
+      return reply(replyToken, `Facebook didn’t accept the post, so nothing was published.\n(${err.message.slice(0, 300)})`);
+    }
+  }
+
+  if (name === 'fbphoto') {
+    const session = source.type === 'user' ? activeImageSession(source.userId) : null;
+    if (!session) return reply(replyToken, '📷 Send me the photo first, then /fbphoto with your caption (within 10 minutes).');
+    pendingFacebookPost = { image: session.image, message: arg.trim().slice(0, 63206), expiresAt: Date.now() + FACEBOOK_CONFIRM_MS };
+    return reply(replyToken, `📘 Ready to post a photo to your Facebook Page${pendingFacebookPost.message ? ` with this caption:\n\n${pendingFacebookPost.message.slice(0, 1500)}` : ' (no caption).'}\n\n👉 Reply /post to publish it, or /cancel.`);
+  }
+
+  // /fb <text>
+  if (!arg) return reply(replyToken, FACEBOOK_HELP);
+  const draft = parseFacebookPost(arg);
+  if (draft.error === 'too-long') return reply(replyToken, 'That post is too long for Facebook.');
+  if (draft.error) return reply(replyToken, FACEBOOK_HELP);
+
+  pendingFacebookPost = { ...draft, expiresAt: Date.now() + FACEBOOK_CONFIRM_MS };
+  const preview = draft.message.length > 1500 ? `${draft.message.slice(0, 1500)}…` : draft.message;
+  return reply(replyToken, `📘 Ready to post to your Facebook Page:\n\n${preview}${draft.link ? `\n\n🔗 Link preview: ${draft.link}` : ''}\n\n👉 Reply /post to publish it, or /cancel.`);
+}
+
 async function handleEmailCommand(name, arg, replyToken, source) {
   if (!isCalendarOwner(source)) return reply(replyToken, HELP_TEXT);
-
-  if (name === 'cancel') {
-    const had = Boolean(pendingEmail);
-    pendingEmail = null;
-    return reply(replyToken, had ? '🗑 Email discarded. Nothing was sent.' : 'There’s no email waiting to be sent.');
-  }
 
   if (name === 'send') {
     if (!pendingEmail || Date.now() > pendingEmail.expiresAt) {
