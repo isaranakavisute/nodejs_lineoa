@@ -35,6 +35,12 @@ const bareAddress = (text) => (text.match(/<([^>]+)>\s*$/)?.[1] ?? text).trim().
 // Your own address (EMAIL_MY_ADDRESS), lower case; '' if not set.
 const myAddress = () => config.email.myAddress.trim().toLowerCase();
 
+// You as a recipient: "Isara Nakavisute <isara_nakavisute@hotmail.com>" (EMAIL_MY_NAME, EMAIL_MY_ADDRESS).
+function myself() {
+  const name = config.email.myName.trim();
+  return { emailAddress: { ...(name ? { name } : {}), address: config.email.myAddress.trim() } };
+}
+
 // How many unique people besides you and the sender were on the email (To and Cc), i.e. who else
 // "Reply all" would reach. People are compared by email address only, so "Isara <a@x.com>" and
 // "A@x.com" are the same person. Without EMAIL_MY_ADDRESS, one To/Cc address is assumed to be you.
@@ -100,12 +106,11 @@ export function replyRecipients(original, { all }) {
   const me = myAddress();
   const sender = original.replyTo?.length ? original.replyTo : [original.from];
   if (!me) return {}; // let Graph choose the recipients as Outlook would
-  const myself = { emailAddress: { address: config.email.myAddress.trim() } };
   let to = uniqueRecipients(all ? [...sender, ...(original.toRecipients ?? [])] : sender, [me]);
   // Replying to your own email: keep yourself as the only recipient rather than none.
-  if (to.length === 0) to = [myself];
+  if (to.length === 0) to = [myself()];
   const cc = all ? uniqueRecipients(original.ccRecipients ?? [], [me, ...addressesOf(to)]) : [];
-  const copyMe = addressesOf(to).some((a) => a.toLowerCase() === me) ? [] : [myself];
+  const copyMe = addressesOf(to).some((a) => a.toLowerCase() === me) ? [] : [myself()];
   return { toRecipients: to, ccRecipients: [...cc, ...copyMe] };
 }
 
@@ -127,11 +132,13 @@ export function sendReply(id, text, { all = false } = {}) {
 export function sendForward(id, to, text) {
   const me = myAddress();
   const toRecipients = to.map((address) => ({ emailAddress: { address } }));
-  const copyMe = me && !to.some((a) => a.toLowerCase() === me) ? [{ emailAddress: { address: config.email.myAddress.trim() } }] : [];
+  const copyMe = me && !to.some((a) => a.toLowerCase() === me) ? [myself()] : [];
   return send(id, 'forward', text, () => ({ toRecipients, ...(copyMe.length ? { ccRecipients: copyMe } : {}) }));
 }
 
-// For previews: "you (address)" when you are copied, else ''.
+// For previews: "Isara Nakavisute <isara_nakavisute@hotmail.com>" when you are copied, else ''.
 export function copyToMeLabel() {
-  return myAddress() ? `you (${config.email.myAddress.trim()})` : '';
+  if (!myAddress()) return '';
+  const { name, address } = myself().emailAddress;
+  return name ? `${name} <${address}>` : address;
 }

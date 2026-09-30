@@ -14,6 +14,7 @@ process.env.DATA_DIR = dataDir;
 process.env.MICROSOFT_CLIENT_ID = 'test-client';
 process.env.CALENDAR_ALERT_TO = 'Uowner';
 process.env.EMAIL_MY_ADDRESS = 'isara_nakavisute@hotmail.com';
+process.env.EMAIL_MY_NAME = 'Isara Nakavisute';
 process.env.CALENDAR_TIMEZONE = 'Asia/Bangkok';
 process.env.FACEBOOK_PAGE_ID = '111';
 process.env.FACEBOOK_PAGE_ACCESS_TOKEN = 'page-token';
@@ -52,10 +53,15 @@ client.showLoadingAnimation = async () => ({});
 blobClient.getMessageContent = async () => Readable.from([Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3])]);
 
 // Two unread emails in the Inbox (none in Junk).
-const mail = (id, subject, name, address) => ({
-  id, subject, from: { emailAddress: { name, address } }, toRecipients: [{ emailAddress: { address: 'isara_nakavisute@hotmail.com' } }],
-  ccRecipients: [], sentDateTime: new Date().toISOString(), receivedDateTime: new Date().toISOString(), body: { content: 'Hello' },
-});
+// Fixed times (m1 newest) so the email numbers never swap between runs.
+const received = { m1: -60000, m2: -120000, m3: -30000 };
+const mail = (id, subject, name, address) => {
+  const time = new Date(Date.now() + (received[id] ?? -180000)).toISOString();
+  return {
+    id, subject, from: { emailAddress: { name, address } }, toRecipients: [{ emailAddress: { address: 'isara_nakavisute@hotmail.com' } }],
+    ccRecipients: [], sentDateTime: time, receivedDateTime: time, body: { content: 'Hello' },
+  };
+};
 const INBOX = [mail('m1', 'Project kickoff', 'Somchai Jaidee', 'somchai@example.com'), mail('m2', 'Invoice', '', 'billing@example.com')];
 // Project kickoff also went to two colleagues; Invoice went only to me.
 INBOX[0].toRecipients.push({ emailAddress: { name: 'Ann', address: 'ann@example.com' } });
@@ -296,7 +302,6 @@ test('reply all to an email where the sender only Cc\'d themselves greets the se
     ...mail('m3', 'Test', 'Isara Nakavisute', 'isara.nakavisute@gmail.com'),
     toRecipients: [{ emailAddress: { name: 'isara_nakavisute@hotmail.com', address: 'isara_nakavisute@hotmail.com' } }],
     ccRecipients: [{ emailAddress: { name: 'isara.nakavisute@gmail.com', address: 'isara.nakavisute@gmail.com' } }],
-    receivedDateTime: new Date(Date.now() + 60000).toISOString(), // newest, so it is email 1
   });
   await text('/inbox');
   await text('/replyall 1');
@@ -311,7 +316,7 @@ test('reply all to an email where the sender only Cc\'d themselves greets the se
 test('replies and forwards always copy me, and reply all keeps everyone else', async () => {
   const { replyRecipients } = await import('../src/mailActions.js');
   const r = (address, name) => ({ emailAddress: name ? { name, address } : { address } });
-  const me = r('isara_nakavisute@hotmail.com');
+  const me = r('isara_nakavisute@hotmail.com', 'Isara Nakavisute');
   const original = {
     from: r('somchai@example.com', 'Somchai'),
     toRecipients: [r('Isara_Nakavisute@hotmail.com', 'Isara'), r('ann@example.com', 'Ann')],
@@ -338,9 +343,9 @@ test('sent reply, reply all and forward carry the right To and Cc', async () => 
   await text('/inbox');
   await text('/reply 1');
   await tapButton('🙏 Thank you');
-  assert.match(last().text, /Cc: you \(isara_nakavisute@hotmail\.com\)/);
+  assert.match(last().text, /Cc: Isara Nakavisute <isara_nakavisute@hotmail\.com>/);
   await tapButton('✅ Send');
-  assert.match(last().text, /A copy goes to you \(isara_nakavisute@hotmail\.com\)/);
+  assert.match(last().text, /A copy goes to Isara Nakavisute <isara_nakavisute@hotmail\.com>/);
   await tapButton('✅ Yes, send now');
   assert.deepEqual(sentTo(), { to: ['somchai@example.com'], cc: ['isara_nakavisute@hotmail.com'] });
 
@@ -353,10 +358,11 @@ test('sent reply, reply all and forward carry the right To and Cc', async () => 
   await text('/forward 1');
   await text('boss@example.com');
   await tapButton('ℹ️ FYI');
-  assert.match(last().text, /To: boss@example\.com\nCc: you/);
+  assert.match(last().text, /To: boss@example\.com\nCc: Isara Nakavisute <isara_nakavisute@hotmail\.com>/);
   await tapButton('✅ Send');
   await tapButton('✅ Yes, send now');
   assert.deepEqual(sentTo(), { to: ['boss@example.com'], cc: ['isara_nakavisute@hotmail.com'] });
+  assert.deepEqual(JSON.parse(writes.at(-1).body).message.ccRecipients, [{ emailAddress: { name: 'Isara Nakavisute', address: 'isara_nakavisute@hotmail.com' } }]);
 });
 
 test('each card\'s buttons act on that card\'s email', async () => {
