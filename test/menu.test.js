@@ -13,6 +13,7 @@ process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:9';
 process.env.DATA_DIR = dataDir;
 process.env.MICROSOFT_CLIENT_ID = 'test-client';
 process.env.CALENDAR_ALERT_TO = 'Uowner';
+process.env.EMAIL_MY_ADDRESS = 'isara_nakavisute@hotmail.com';
 process.env.CALENDAR_TIMEZONE = 'Asia/Bangkok';
 process.env.FACEBOOK_PAGE_ID = '111';
 process.env.FACEBOOK_PAGE_ACCESS_TOKEN = 'page-token';
@@ -23,15 +24,36 @@ const { client, blobClient } = await import('../src/line.js');
 
 // Captures every bot reply: its text and the labels of its buttons.
 const replies = [];
+// Flex cards in a reply: each card's texts and button actions.
+const collect = (node, type, out = []) => {
+  if (node && typeof node === 'object') {
+    if (node.type === type) out.push(node);
+    Object.values(node).forEach((v) => collect(v, type, out));
+  }
+  return out;
+};
+const cardsOf = (messages) => messages.filter((m) => m.type === 'flex').flatMap((m) => (m.contents.type === 'carousel' ? m.contents.contents : [m.contents]))
+  .map((bubble) => ({ text: collect(bubble, 'text').map((t) => t.text).join('\n'), buttons: collect(bubble, 'button').map((b) => b.action) }));
 client.replyMessage = async ({ messages }) => {
-  replies.push({ text: messages.map((m) => m.text).join('\n\n'), buttons: (messages.at(-1).quickReply?.items ?? []).map((i) => i.action) });
+  replies.push({
+    text: messages.map((m) => m.text).filter(Boolean).join('\n\n'),
+    buttons: (messages.at(-1).quickReply?.items ?? []).map((i) => i.action),
+    cards: cardsOf(messages),
+    messages,
+  });
+};
+// Taps a button inside email card `n` (1-based) of the last reply.
+const tapCard = (n, label) => {
+  const action = last().cards[n - 1]?.buttons.find((b) => b.label === label);
+  assert.ok(action, `button "${label}" should be on card ${n}`);
+  return tap(action.data);
 };
 client.showLoadingAnimation = async () => ({});
 blobClient.getMessageContent = async () => Readable.from([Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3])]);
 
 // Two unread emails in the Inbox (none in Junk).
 const mail = (id, subject, name, address) => ({
-  id, subject, from: { emailAddress: { name, address } }, toRecipients: [{ emailAddress: { address: 'me@hotmail.com' } }],
+  id, subject, from: { emailAddress: { name, address } }, toRecipients: [{ emailAddress: { address: 'isara_nakavisute@hotmail.com' } }],
   ccRecipients: [], sentDateTime: new Date().toISOString(), receivedDateTime: new Date().toISOString(), body: { content: 'Hello' },
 });
 const INBOX = [mail('m1', 'Project kickoff', 'Somchai Jaidee', 'somchai@example.com'), mail('m2', 'Invoice', '', 'billing@example.com')];
@@ -67,6 +89,15 @@ const tapButton = (label) => {
   return action.type === 'message' ? text(action.text) : tap(action.data);
 };
 const last = () => replies.at(-1);
+// Taps ✅ Send on an email preview, checks the "are you sure?" prompt (nothing sent yet), then confirms.
+async function confirmAndSend(question) {
+  const count = writes.length;
+  await tapButton('✅ Send');
+  assert.match(last().text, /⚠️ Please confirm/);
+  assert.match(last().text, question);
+  assert.equal(writes.length, count, 'nothing sent before ✅ Yes, send now');
+  await tapButton('✅ Yes, send now');
+}
 
 test('/menu and menu tiles show buttons; other users get nothing private', async () => {
   await text('/menu');
@@ -154,19 +185,22 @@ test('language flow and quick language buttons', async () => {
 test('/inbox: pick an email, reply with a standard response, preview, then send', async () => {
   await text('/inbox');
   assert.match(last().text, /Unread emails today: 2/);
-  assert.deepEqual(last().buttons.map((b) => b.label), ['1. Project kickoff', '2. Invoice']);
-  await tapButton('1. Project kickoff');
-  assert.match(last().text, /Email 1\nProject kickoff\nFrom: Somchai Jaidee <somchai@example.com>/);
-  assert.deepEqual(last().buttons.map((b) => b.label), ['↩️ Reply', '👥 Reply all', '➡️ Forward']);
+  // No buttons at the end of the chat; each email is a card with its own buttons.
+  assert.equal(last().buttons.length, 0);
+  assert.equal(last().cards.length, 2);
+  assert.match(last().cards[0].text, /Email 1 of 2\nProject kickoff\nFrom: Somchai Jaidee <somchai@example.com>/);
+  assert.match(last().cards[1].text, /Email 2 of 2\nInvoice/);
+  for (const c of last().cards) assert.deepEqual(c.buttons.map((b) => b.label), ['↩️ Reply', '👥 Reply all', '➡️ Forward']);
+  assert.equal(last().messages[1].contents.type, 'carousel');
 
-  await tapButton('↩️ Reply');
+  await tapCard(1, '↩️ Reply');
   assert.ok(last().buttons.some((b) => b.label === '✅ Well received'));
   const count = writes.length;
   await tapButton('✅ Well received');
   assert.match(last().text, /Ready to reply[\s\S]*RE: Project kickoff[\s\S]*Dear Somchai Jaidee,\n\nYour message is well received\. I will get back to you\.\n\nBest Regards,\nIsara Nakavisute/);
   assert.equal(writes.length, count, 'nothing sent before ✅ Send');
 
-  await tapButton('✅ Send');
+  await confirmAndSend(/Please confirm\n\nSend your reply to Somchai Jaidee <somchai@example.com>\?/);
   assert.match(last().text, /Replied: "Project kickoff"/);
   const sent = writes.at(-1);
   assert.equal(sent.path, '/v1.0/me/messages/m1/reply');
@@ -184,7 +218,7 @@ test('reply all greets "Dear all"; own text and Thai template work', async () =>
   await tapButton('✍️ Write my own');
   await text('Hi team,\nSee you Friday.\nIsara');
   assert.match(last().text, /Ready to reply to all[\s\S]*Hi team,\nSee you Friday\.\nIsara/);
-  await tapButton('✅ Send');
+  await confirmAndSend(/Reply to all: send your reply to Somchai Jaidee <somchai@example.com> and 2 other people\?/);
   assert.equal(writes.at(-1).path, '/v1.0/me/messages/m1/replyAll');
   assert.match(JSON.parse(writes.at(-1).body).message.body.content, /^Hi team,\nSee you Friday\.\nIsara/);
 
@@ -212,7 +246,7 @@ test('forward asks for the address, offers notes, and sends to that address', as
   await text('boss@example.com');
   await tapButton('ℹ️ FYI');
   assert.match(last().text, /Ready to forward[\s\S]*To: boss@example.com[\s\S]*FW: Project kickoff[\s\S]*FYI\./);
-  await tapButton('✅ Send');
+  await confirmAndSend(/Forward \"Project kickoff\" to boss@example.com\?/);
   assert.match(last().text, /Forwarded "Project kickoff" to boss@example.com/);
   const sent = JSON.parse(writes.at(-1).body);
   assert.equal(writes.at(-1).path, '/v1.0/me/messages/m1/forward');
@@ -228,7 +262,110 @@ test('an email number that was not listed is explained', async () => {
 test('otherRecipients counts people besides me and the sender', async () => {
   const { otherRecipients } = await import('../src/mailActions.js');
   const from = 'A <a@x.com>';
-  assert.equal(otherRecipients({ from, to: ['me@hotmail.com'], cc: [] }), 0);
-  assert.equal(otherRecipients({ from, to: ['me@hotmail.com', from], cc: [] }), 0, 'sender copying themselves');
-  assert.equal(otherRecipients({ from, to: ['me@hotmail.com', 'B <b@x.com>'], cc: ['C <c@x.com>'] }), 2);
+  assert.equal(otherRecipients({ from, to: ['isara_nakavisute@hotmail.com'], cc: [] }), 0);
+  assert.equal(otherRecipients({ from, to: ['isara_nakavisute@hotmail.com', from], cc: [] }), 0, 'sender copying themselves');
+  assert.equal(otherRecipients({ from, to: ['isara_nakavisute@hotmail.com', 'B <b@x.com>'], cc: ['C <c@x.com>'] }), 2);
+  // The case from a real reply: sender Cc'd themselves without their display name (and in other letter case).
+  assert.equal(otherRecipients({ from: 'Isara Nakavisute <isara.nakavisute@gmail.com>', to: ['isara_nakavisute@hotmail.com'], cc: ['Isara.Nakavisute@gmail.com'] }), 0);
+  // The same colleague in both To and Cc counts once.
+  assert.equal(otherRecipients({ from, to: ['isara_nakavisute@hotmail.com', 'Bee <b@x.com>'], cc: ['b@x.com'] }), 1);
+});
+
+test('the confirmation can go back to the preview or cancel, and nothing is sent', async () => {
+  await text('/inbox');
+  await text('/reply 1');
+  await tapButton('🙏 Thank you');
+  const count = writes.length;
+  await tapButton('✅ Send');
+  await tapButton('⬅️ Back to preview');
+  assert.match(last().text, /Ready to reply/);
+  await text('Changed my mind, new text.');
+  await tapButton('✅ Send');
+  assert.match(last().text, /Please confirm/);
+  await tapButton('❌ No, cancel');
+  assert.match(last().text, /Cancelled\. Nothing was sent/);
+  assert.equal(writes.length, count);
+  // A stale "Yes" tap after cancelling does nothing.
+  await tap('wiz=sendnow');
+  assert.match(last().text, /expired\. Nothing was sent/);
+  assert.equal(writes.length, count);
+});
+
+test('reply all to an email where the sender only Cc\'d themselves greets the sender by name', async () => {
+  INBOX.push({
+    ...mail('m3', 'Test', 'Isara Nakavisute', 'isara.nakavisute@gmail.com'),
+    toRecipients: [{ emailAddress: { name: 'isara_nakavisute@hotmail.com', address: 'isara_nakavisute@hotmail.com' } }],
+    ccRecipients: [{ emailAddress: { name: 'isara.nakavisute@gmail.com', address: 'isara.nakavisute@gmail.com' } }],
+    receivedDateTime: new Date(Date.now() + 60000).toISOString(), // newest, so it is email 1
+  });
+  await text('/inbox');
+  await text('/replyall 1');
+  assert.match(last().text, /no one else was on this email/);
+  await tapButton('✅ Well received');
+  assert.match(last().text, /Dear Isara Nakavisute,\n\nYour message is well received/);
+  assert.doesNotMatch(last().text, /Dear all/);
+  await tapButton('❌ Cancel');
+  INBOX.pop();
+});
+
+test('replies and forwards always copy me, and reply all keeps everyone else', async () => {
+  const { replyRecipients } = await import('../src/mailActions.js');
+  const r = (address, name) => ({ emailAddress: name ? { name, address } : { address } });
+  const me = r('isara_nakavisute@hotmail.com');
+  const original = {
+    from: r('somchai@example.com', 'Somchai'),
+    toRecipients: [r('Isara_Nakavisute@hotmail.com', 'Isara'), r('ann@example.com', 'Ann')],
+    ccRecipients: [r('bee@example.com'), r('ann@example.com')],
+  };
+  // Reply: only the sender, me in Cc.
+  assert.deepEqual(replyRecipients(original, { all: false }), { toRecipients: [r('somchai@example.com', 'Somchai')], ccRecipients: [me] });
+  // Reply all: sender + other To people; the original Cc (Ann only once); me in Cc; me never in To.
+  assert.deepEqual(replyRecipients(original, { all: true }), {
+    toRecipients: [r('somchai@example.com', 'Somchai'), r('ann@example.com', 'Ann')],
+    ccRecipients: [r('bee@example.com'), me],
+  });
+  // Reply-To is respected.
+  assert.deepEqual(replyRecipients({ ...original, replyTo: [r('team@example.com')] }, { all: false }).toRecipients, [r('team@example.com')]);
+  // My own email (sender is me): I'm the recipient, not also copied.
+  assert.deepEqual(replyRecipients({ from: me, toRecipients: [me], ccRecipients: [] }, { all: true }), { toRecipients: [me], ccRecipients: [] });
+});
+
+test('sent reply, reply all and forward carry the right To and Cc', async () => {
+  const sentTo = () => {
+    const { message } = JSON.parse(writes.at(-1).body);
+    return { to: (message.toRecipients ?? []).map((x) => x.emailAddress.address), cc: (message.ccRecipients ?? []).map((x) => x.emailAddress.address) };
+  };
+  await text('/inbox');
+  await text('/reply 1');
+  await tapButton('🙏 Thank you');
+  assert.match(last().text, /Cc: you \(isara_nakavisute@hotmail\.com\)/);
+  await tapButton('✅ Send');
+  assert.match(last().text, /A copy goes to you \(isara_nakavisute@hotmail\.com\)/);
+  await tapButton('✅ Yes, send now');
+  assert.deepEqual(sentTo(), { to: ['somchai@example.com'], cc: ['isara_nakavisute@hotmail.com'] });
+
+  await text('/replyall 1');
+  await tapButton('🙏 Thank you');
+  await tapButton('✅ Send');
+  await tapButton('✅ Yes, send now');
+  assert.deepEqual(sentTo(), { to: ['somchai@example.com', 'ann@example.com'], cc: ['bee@example.com', 'isara_nakavisute@hotmail.com'] });
+
+  await text('/forward 1');
+  await text('boss@example.com');
+  await tapButton('ℹ️ FYI');
+  assert.match(last().text, /To: boss@example\.com\nCc: you/);
+  await tapButton('✅ Send');
+  await tapButton('✅ Yes, send now');
+  assert.deepEqual(sentTo(), { to: ['boss@example.com'], cc: ['isara_nakavisute@hotmail.com'] });
+});
+
+test('each card\'s buttons act on that card\'s email', async () => {
+  await text('/inbox');
+  await tapCard(2, '👥 Reply all');
+  assert.match(last().text, /Reply all to:\nInvoice/);
+  await tapButton('❌ Cancel');
+  await text('/inbox');
+  await tapCard(1, '➡️ Forward');
+  assert.match(last().text, /Forward:\nProject kickoff/);
+  await tapButton('❌ Cancel');
 });

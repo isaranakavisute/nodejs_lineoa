@@ -6,7 +6,7 @@ import { config } from './config.js';
 import { parseEmailCommand } from './mail.js';
 import { parseMeetCommand, formatDateTime } from './calendar.js';
 import { runCommand, rememberImage } from './handlers.js';
-import { REPLY_TEMPLATES, FORWARD_NOTES, otherRecipients, composeReply, composeForwardNote, sendReply, sendForward } from './mailActions.js';
+import { REPLY_TEMPLATES, FORWARD_NOTES, otherRecipients, copyToMeLabel, composeReply, composeForwardNote, sendReply, sendForward } from './mailActions.js';
 import { NotSignedIn, NoWriteAccess } from './microsoft.js';
 
 // A guided flow in progress, per owner: { flow, step, data, expiresAt }.
@@ -296,23 +296,46 @@ function replyAllNote(email) {
   return `(also to ${others === 1 ? '1 other person' : `${others} other people`} in To/Cc)`;
 }
 
+// "Cc: you (address)" for previews, when replies and forwards copy you.
+const ccLine = () => (copyToMeLabel() ? `\nCc: ${copyToMeLabel()}` : '');
+
 const SEND_BUTTONS = [{ label: '✅ Send', data: { wiz: 'confirm' } }, CANCEL];
 
 function previewMail(state, replyToken) {
   const { flow, data } = state;
-  state.step = 'confirm';
+  state.step = 'preview';
   const text = data.text.length > 1500 ? `${data.text.slice(0, 1500)}…` : data.text;
   if (flow === 'forward') {
     return replyWithOptions(
       replyToken,
-      `➡️ Ready to forward:\n\nTo: ${data.to.join(', ')}\nSubject: FW: ${data.email.subject}\n\n${text || '(no note)'}\n\n(The original email is included below your note.)\n👉 Tap ✅ Send, type a new note to change it, or ❌ Cancel.`,
+      `➡️ Ready to forward:\n\nTo: ${data.to.join(', ')}${ccLine()}\nSubject: FW: ${data.email.subject}\n\n${text || '(no note)'}\n\n(The original email is included below your note.)\n👉 Tap ✅ Send, type a new note to change it, or ❌ Cancel.`,
       SEND_BUTTONS,
     );
   }
   return replyWithOptions(
     replyToken,
-    `${data.all ? '👥 Ready to reply to all' : '↩️ Ready to reply'}:\n\nTo: ${data.email.from}${data.all && otherRecipients(data.email) ? ' and everyone in To/Cc' : ''}\nSubject: RE: ${data.email.subject}\n\n${text}\n\n(The original email is quoted below your reply.)\n👉 Tap ✅ Send, type a new reply to change it, or ❌ Cancel.`,
+    `${data.all ? '👥 Ready to reply to all' : '↩️ Ready to reply'}:\n\nTo: ${data.email.from}${data.all && otherRecipients(data.email) ? ' and everyone in To/Cc' : ''}${ccLine()}\nSubject: RE: ${data.email.subject}\n\n${text}\n\n(The original email is quoted below your reply.)\n👉 Tap ✅ Send, type a new reply to change it, or ❌ Cancel.`,
     [SEND_BUTTONS[0], { label: '⬅️ Other responses', data: { wiz: 'back' } }, CANCEL],
+  );
+}
+
+// The last step before sending: an explicit "are you sure?" naming who will receive it.
+function confirmMail(state, replyToken) {
+  const { flow, data } = state;
+  state.step = 'final';
+  const others = otherRecipients(data.email);
+  let question;
+  if (flow === 'forward') {
+    question = `Forward "${data.email.subject}" to ${data.to.join(', ')}?`;
+  } else if (data.all && others) {
+    question = `Reply to all: send your reply to ${data.email.from} and ${others === 1 ? '1 other person' : `${others} other people`}?`;
+  } else {
+    question = `Send your reply to ${data.email.from}?`;
+  }
+  return replyWithOptions(
+    replyToken,
+    `⚠️ Please confirm\n\n${question}${copyToMeLabel() ? `\nA copy goes to ${copyToMeLabel()}.` : ''}\n\nOnce sent, it can't be undone.`,
+    [{ label: '✅ Yes, send now', data: { wiz: 'sendnow' } }, { label: '⬅️ Back to preview', data: { wiz: 'preview' } }, { label: '❌ No, cancel', data: { wiz: 'cancel' } }],
   );
 }
 
@@ -393,13 +416,18 @@ export async function handlePostback(event) {
     state.step = wiz === 'own' ? 'own' : 'compose';
     return ask(replyToken, 'reply', state.step, '', state.data);
   }
+  // Emails need two taps: ✅ Send on the preview, then ✅ Yes, send now on the confirmation.
+  if (mailFlow && wiz === 'preview' && state.step === 'final') return previewMail(state, replyToken);
+  if (mailFlow && wiz === 'sendnow' && state.step === 'final') return sendMail(state, replyToken, source.userId);
   if (wiz === 'confirm') {
     if (state?.flow === 'meet' && state.step === 'confirm') {
       const { when, length, title } = state.data;
       return finish(source.userId, `/meet ${when} ${length} ${title}`, replyToken, source);
     }
-    if (mailFlow && state.step === 'confirm') return sendMail(state, replyToken, source.userId);
-    return replyWithOptions(replyToken, 'That has expired. Start again from the menu.', [{ label: '📋 Menu', menu: 'main' }]);
+    if (mailFlow && state.step === 'preview') return confirmMail(state, replyToken);
+  }
+  if (wiz === 'confirm' || wiz === 'sendnow' || wiz === 'preview') {
+    return replyWithOptions(replyToken, 'That has expired. Nothing was sent. Start again from the menu.', [{ label: '📋 Menu', menu: 'main' }]);
   }
   return showMenu('main', replyToken);
 }

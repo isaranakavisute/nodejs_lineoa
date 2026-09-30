@@ -12,7 +12,7 @@ process.env.MICROSOFT_CLIENT_ID = 'test-client';
 process.env.CALENDAR_ALERT_TO = 'Uowner';
 process.env.CALENDAR_TIMEZONE = 'Asia/Bangkok';
 
-const { firstLines, formatInbox, fetchUnreadToday } = await import('../src/inbox.js');
+const { firstLines, formatInbox, fetchUnreadToday, inboxMessages } = await import('../src/inbox.js');
 
 test('keeps the first 5 non-empty lines', () => {
   assert.deepEqual(firstLines('Hi Isara,\r\n\r\n  line 2 \n\nline 3\nline 4\nline 5\nline 6'), ['Hi Isara,', 'line 2', 'line 3', 'line 4', 'line 5']);
@@ -108,5 +108,48 @@ test('checks Inbox and Junk for unread mail since midnight Bangkok time, read-on
     assert.match(text, /1️⃣ Newest/);
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test('inbox cards: one per email, within LINE limits (12 per carousel, 5 messages, 50 KB)', () => {
+  const email = { folder: 'Inbox', from: 'A <a@x.com>', to: ['me@x.com'], cc: [], subject: 'Hello', sent: new Date(), received: new Date(), preview: Array(5).fill('x'.repeat(200)) };
+  assert.deepEqual(inboxMessages({ emails: [], hasMore: false }), [{ type: 'text', text: '📭 No unread emails today (Inbox and Junk).' }]);
+
+  const one = inboxMessages({ emails: [email], hasMore: false });
+  assert.equal(one.length, 2);
+  assert.equal(one[1].contents.type, 'bubble');
+
+  const many = inboxMessages({ emails: Array(30).fill(email), hasMore: true });
+  assert.ok(many.length <= 5);
+  const flex = many.slice(1);
+  const cards = flex.flatMap((m) => m.contents.contents);
+  assert.equal(cards.length, 30);
+  for (const m of flex) {
+    assert.ok(m.contents.contents.length <= 12);
+    assert.ok(JSON.stringify(m.contents).length < 50000);
+    assert.ok(m.altText.length <= 400);
+  }
+  assert.match(many[0].text, /Showing the newest 30/);
+});
+
+test('/inbox shows only the newest 5, but counts every unread email', async () => {
+  const at = (i) => new Date(Date.UTC(2026, 8, 28, 2, i)).toISOString();
+  const msg = (i) => ({ id: `m${i}`, subject: `Email ${i}`, from: { emailAddress: { address: 'a@x.com' } }, toRecipients: [], ccRecipients: [], sentDateTime: at(i), receivedDateTime: at(i), body: { content: 'hi' } });
+  const saved = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = new URL(url);
+    if (u.hostname === 'login.microsoftonline.com') return new Response(JSON.stringify({ access_token: 'a', refresh_token: 'r', expires_in: 3600 }));
+    const value = u.pathname.includes('/inbox/') ? Array.from({ length: 8 }, (_, i) => msg(i)) : [msg(20), msg(21)];
+    return new Response(JSON.stringify({ value }));
+  };
+  try {
+    const result = await fetchUnreadToday(new Date('2026-09-28T05:00:00Z'));
+    assert.deepEqual(result.emails.map((e) => e.subject), ['Email 21', 'Email 20', 'Email 7', 'Email 6', 'Email 5']);
+    assert.deepEqual(result.counts, { Inbox: 8, Junk: 2 });
+    const [head, cards] = inboxMessages(result);
+    assert.match(head.text, /Unread emails today: 10\n\(Inbox: 8, Junk: 2\)[\s\S]*Showing the newest 5\. Open Outlook to see the rest\./);
+    assert.equal(cards.contents.contents.length, 5);
+  } finally {
+    globalThis.fetch = saved;
   }
 });

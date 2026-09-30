@@ -42,6 +42,9 @@ export const config = {
   email: {
     // Name under the standard email responses ("Best Regards," + this). Empty = no name.
     signature: process.env.EMAIL_SIGNATURE ?? 'Isara Nakavisute',
+    // Your own address: copied (Cc) on every reply, reply all and forward sent from LINE,
+    // and left out when counting who else a reply-all reaches. Empty = don't copy.
+    myAddress: process.env.EMAIL_MY_ADDRESS ?? 'isara_nakavisute@hotmail.com',
   },
   facebook: {
     // The Facebook Page the owner can post to from LINE (/fb). See README "Posting to Facebook".

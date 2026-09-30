@@ -29,11 +29,20 @@ const signOff = (thai) => `${thai ? 'ขอแสดงความนับถ�
 // A display name worth greeting: not empty and not just an email address.
 const greetable = (name) => (name && !name.includes('@') ? name : '');
 
-// How many people besides you and the sender were on the email (To and Cc), i.e. who else
-// "Reply all" would reach. You are one of the To/Cc addresses, so one is not counted.
+// The bare, lower-case email address from "Name <address>" or "address".
+const bareAddress = (text) => (text.match(/<([^>]+)>\s*$/)?.[1] ?? text).trim().toLowerCase();
+
+// Your own address (EMAIL_MY_ADDRESS), lower case; '' if not set.
+const myAddress = () => config.email.myAddress.trim().toLowerCase();
+
+// How many unique people besides you and the sender were on the email (To and Cc), i.e. who else
+// "Reply all" would reach. People are compared by email address only, so "Isara <a@x.com>" and
+// "A@x.com" are the same person. Without EMAIL_MY_ADDRESS, one To/Cc address is assumed to be you.
 export function otherRecipients(email) {
-  const everyone = new Set([...email.to, ...email.cc].filter((address) => address !== email.from));
-  return Math.max(everyone.size - 1, 0);
+  const sender = bareAddress(email.from);
+  const me = myAddress();
+  const everyone = new Set([...email.to, ...email.cc].map(bareAddress).filter((address) => address !== sender && address !== me));
+  return me ? everyone.size : Math.max(everyone.size - 1, 0);
 }
 
 // The full reply text for a standard response: greeting, response, sign-off.
@@ -53,11 +62,14 @@ export function composeForwardNote(note) {
 const listAddresses = (recipients = []) =>
   recipients.map(({ emailAddress: a }) => (a?.name && a.name !== a.address ? `${a.name} <${a.address}>` : a?.address)).join('; ');
 
-// The original email as plain text, quoted under the reply the way Outlook does.
-async function quotedOriginal(id) {
-  const m = await graphGet(`/me/messages/${encodeURIComponent(id)}?$select=from,toRecipients,ccRecipients,subject,sentDateTime,body`, {
+function fetchOriginal(id) {
+  return graphGet(`/me/messages/${encodeURIComponent(id)}?$select=from,replyTo,toRecipients,ccRecipients,subject,sentDateTime,body`, {
     Prefer: 'outlook.body-content-type="text"',
   });
+}
+
+// The original email as plain text, quoted under the reply the way Outlook does.
+function quote(m) {
   const lines = ['________________________________', `From: ${listAddresses([m.from])}`, `Sent: ${formatDateTime(new Date(m.sentDateTime))}`];
   if (m.toRecipients?.length) lines.push(`To: ${listAddresses(m.toRecipients)}`);
   if (m.ccRecipients?.length) lines.push(`Cc: ${listAddresses(m.ccRecipients)}`);
@@ -65,19 +77,61 @@ async function quotedOriginal(id) {
   return lines.join('\n');
 }
 
+// Recipients with each address once (compared in lower case), leaving out `exclude`.
+function uniqueRecipients(recipients, exclude = []) {
+  const seen = new Set(exclude.map((a) => a.toLowerCase()));
+  const result = [];
+  for (const r of recipients) {
+    const address = r?.emailAddress?.address?.toLowerCase();
+    if (!address || seen.has(address)) continue;
+    seen.add(address);
+    result.push({ emailAddress: { address: r.emailAddress.address, ...(r.emailAddress.name ? { name: r.emailAddress.name } : {}) } });
+  }
+  return result;
+}
+
+const addressesOf = (recipients) => recipients.map((r) => r.emailAddress.address);
+
+// To and Cc for a reply, with you (EMAIL_MY_ADDRESS) always in Cc.
+// Reply: To = the sender (or their Reply-To). Reply all: To = the sender + the original To, Cc = the
+// original Cc, leaving you out of both before adding you to Cc. The lists are built here, not left to
+// Graph, because setting Cc on a reply-all could replace the Cc people Graph would otherwise add.
+export function replyRecipients(original, { all }) {
+  const me = myAddress();
+  const sender = original.replyTo?.length ? original.replyTo : [original.from];
+  if (!me) return {}; // let Graph choose the recipients as Outlook would
+  const myself = { emailAddress: { address: config.email.myAddress.trim() } };
+  let to = uniqueRecipients(all ? [...sender, ...(original.toRecipients ?? [])] : sender, [me]);
+  // Replying to your own email: keep yourself as the only recipient rather than none.
+  if (to.length === 0) to = [myself];
+  const cc = all ? uniqueRecipients(original.ccRecipients ?? [], [me, ...addressesOf(to)]) : [];
+  const copyMe = addressesOf(to).some((a) => a.toLowerCase() === me) ? [] : [myself];
+  return { toRecipients: to, ccRecipients: [...cc, ...copyMe] };
+}
+
 // Sends the body as plain text (so line breaks are kept) with the original quoted underneath.
-// Graph fills in the recipients, "RE:"/"FW:" subject and conversation threading.
-async function send(id, action, text, extra = {}) {
-  const content = `${text}\n\n${await quotedOriginal(id)}`;
+// Graph fills in the "RE:"/"FW:" subject and conversation threading.
+async function send(id, action, text, recipientsFor) {
+  const original = await fetchOriginal(id);
+  const content = `${text}\n\n${quote(original)}`;
   await graphRequest('POST', `/me/messages/${encodeURIComponent(id)}/${action}`, {
-    body: { message: { ...extra, body: { contentType: 'Text', content } } },
+    body: { message: { ...recipientsFor(original), body: { contentType: 'Text', content } } },
   });
 }
 
 export function sendReply(id, text, { all = false } = {}) {
-  return send(id, all ? 'replyAll' : 'reply', text);
+  return send(id, all ? 'replyAll' : 'reply', text, (original) => replyRecipients(original, { all }));
 }
 
+// Forward to `to`, with you (EMAIL_MY_ADDRESS) in Cc unless you are already a recipient.
 export function sendForward(id, to, text) {
-  return send(id, 'forward', text, { toRecipients: to.map((address) => ({ emailAddress: { address } })) });
+  const me = myAddress();
+  const toRecipients = to.map((address) => ({ emailAddress: { address } }));
+  const copyMe = me && !to.some((a) => a.toLowerCase() === me) ? [{ emailAddress: { address: config.email.myAddress.trim() } }] : [];
+  return send(id, 'forward', text, () => ({ toRecipients, ...(copyMe.length ? { ccRecipients: copyMe } : {}) }));
+}
+
+// For previews: "you (address)" when you are copied, else ''.
+export function copyToMeLabel() {
+  return myAddress() ? `you (${config.email.myAddress.trim()})` : '';
 }

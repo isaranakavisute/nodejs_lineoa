@@ -9,9 +9,9 @@ import { subscribe, unsubscribe, getSubscription } from './store.js';
 import { fetchEvents, formatAgenda, AGENDA_RANGES, parseAgendaRange, parseMeetCommand, createEvent, deleteEvent, formatDateTime } from './calendar.js';
 import { NotSignedIn, NoWriteAccess, hasPermission, isSignedIn } from './microsoft.js';
 import { parseEmailCommand, sendEmail } from './mail.js';
-import { fetchUnreadToday, formatInbox, rememberListed, listedEmail } from './inbox.js';
+import { fetchUnreadToday, inboxMessages, rememberListed, listedEmail } from './inbox.js';
 import { parseFacebookPost, postText, postPhoto, isFacebookConfigured, FacebookNotConfigured, FacebookTokenInvalid } from './facebook.js';
-import { replyWithOptions, quickReply, handlePostback, handleFlowText, handleFlowImage, endFlow, startFlow, showMenu, isOwner } from './menu.js';
+import { replyWithOptions, handlePostback, handleFlowText, handleFlowImage, endFlow, startFlow, showMenu, isOwner } from './menu.js';
 
 // A Facebook post waiting for the owner to confirm with /post: { message, link?, image?, expiresAt }.
 let pendingFacebookPost = null;
@@ -68,19 +68,20 @@ const EMAIL_COMMANDS_HELP = `📧 Email commands
 /inbox  (or /mail)
 Shows today's unread emails from your Inbox and Junk folders:
 • how many unread emails arrived today
-• for each one: subject, sender, recipients (To/Cc), time sent, and the first 5 lines
+• the newest 5, each with: subject, sender, recipients (To/Cc), time sent, and the first 5 lines
 • junk is marked ⚠️ [Junk]
 Checking never marks emails as read.
 
 ↩️ REPLY / FORWARD
-Tap the buttons under the list, or type the email's number:
+Each email is a card (swipe ⬅️ ➡️) with its own Reply / Reply all / Forward buttons. Or type the email's number:
 /inbox 2 – show email 2 with Reply / Reply all / Forward buttons
 /reply 2 – reply to the sender
 /replyall 2 – reply to everyone
 /forward 2 – forward it (I ask who to send it to)
 • Tap a standard response (e.g. "Your message is well received…") or type your own
-• I show a preview first; nothing is sent until you tap ✅ Send
+• I show a preview, then ask you to confirm; nothing is sent until you tap ✅ Send and then ✅ Yes, send now
 • The original email is quoted underneath, as in Outlook
+• You are always copied (Cc) on replies and forwards
 
 ✉️ SEND EMAIL
 Write three lines in one message:
@@ -516,13 +517,8 @@ async function handleInboxCommand(replyToken, source) {
   try {
     const result = await fetchUnreadToday(new Date());
     rememberListed(result.emails);
-    const messages = formatInbox(result).map((text) => ({ type: 'text', text }));
-    // Buttons under the list: act on the only email directly, or pick which email first.
-    const buttons = result.emails.length === 1
-      ? mailActionButtons(1)
-      : result.emails.map((e, i) => ({ label: `${i + 1}. ${e.subject}`, cmd: `/inbox ${i + 1}` }));
-    if (buttons.length) messages.at(-1).quickReply = quickReply(buttons);
-    return client.replyMessage({ replyToken, messages });
+    // One card per email, each with its own Reply / Reply all / Forward buttons.
+    return client.replyMessage({ replyToken, messages: inboxMessages(result) });
   } catch (err) {
     if (err instanceof NotSignedIn) return reply(replyToken, '📬 Not connected to your Outlook account. Run "npm run microsoft-login" on the server.');
     console.error('Inbox check failed:', err.message);
